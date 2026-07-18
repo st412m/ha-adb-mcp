@@ -1,0 +1,28 @@
+name: "ADB MCP Server"
+description: "MCP server for controlling Android devices over network ADB"
+version: "0.1.0"
+slug: adb_mcp
+init: false
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: services
+boot: auto
+ports:
+  3200/tcp: 3200
+  5037/tcp: null
+map:
+  - media:rw
+  - share:rw
+options:
+  log_requests: false
+  token: "changeme"
+  allow_shell: true
+  devices: []
+schema:
+  log_requests: bool
+  token: str
+  allow_shell: bool
+  devices:
+    - str
