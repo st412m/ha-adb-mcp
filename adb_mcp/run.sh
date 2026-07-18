@@ -36,7 +36,7 @@ done
 
 adb devices -l
 
-bashio::log.info "Starting ADB MCP Server v0.2.0 on port 3199 (allow_shell: ${ALLOW_SHELL})"
+bashio::log.info "Starting ADB MCP Server on port 3199 (allow_shell: ${ALLOW_SHELL})"
 node /server.js 3199 &
 
 sleep 2

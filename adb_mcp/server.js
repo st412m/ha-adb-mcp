@@ -13,9 +13,10 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 
 // push/pull ограничены этими корнями на стороне HA
@@ -42,7 +43,7 @@ function adb(args, opts = {}) {
         const msg = (stderr || '').toString().trim() || err.message;
         return reject(new Error(msg));
       }
-      resolve(stdout);
+      resolve(opts.withStderr ? { stdout, stderr } : stdout);
     });
   });
 }
@@ -92,6 +93,11 @@ function parseUiDump(xml) {
   }
   return nodes.length ? nodes.join('\n') : '(no interactive/labeled nodes found)';
 }
+
+// v0.2.1: uiautomator может отдать устаревший дамп (кэш) сразу после смены экрана.
+// Храним хэш последнего дампа per-serial: если новый дамп побайтово совпал с
+// предыдущим — ждём 600мс и дампим повторно (наблюдалось на S20 FE, смоук 18.07).
+const lastUiDumpHash = new Map();
 
 const TOOLS = [
   {
@@ -154,7 +160,7 @@ const TOOLS = [
   },
   {
     name: 'adb_install',
-    description: 'Install an APK from HA filesystem (/media or /share, e.g. /media/VAULT/apk/app.apk). Flags -r (reinstall) and -g (grant all permissions) applied by default.',
+    description: 'Install an APK from HA filesystem (/media or /share, e.g. /media/VAULT/apk/app.apk). Flags -r (reinstall), -t (allow testOnly/debug builds) and -g (grant all permissions) applied by default.',
     inputSchema: { type: 'object', properties: { apk_path: { type: 'string' }, serial: { type: 'string' } }, required: ['apk_path'] }
   },
   {
@@ -174,7 +180,7 @@ const TOOLS = [
   },
   {
     name: 'adb_logcat',
-    description: 'Dump recent logcat lines (non-blocking, -d). Optional filter spec like "ActivityManager:I *:S" or tag substring, and lines limit (default 200).',
+    description: 'Dump recent logcat lines (non-blocking). filter: either a logcat filterspec like "ActivityManager:I *:S" (contains ":" or "*"; *:S is auto-appended if missing so unmatched tags are silenced) or a plain substring grepped case-insensitively across the whole line. lines limits the result (default 200).',
     inputSchema: { type: 'object', properties: { filter: { type: 'string' }, lines: { type: 'number' }, serial: { type: 'string' } } }
   },
 ];
@@ -233,10 +239,23 @@ async function callTool(name, args) {
     }
 
     case 'adb_ui_dump': {
-      await adb(withSerial(serial, ['shell', 'uiautomator dump /sdcard/adbmcp_ui.xml']));
-      const xml = await adb(withSerial(serial, ['shell', 'cat /sdcard/adbmcp_ui.xml']));
-      await adb(withSerial(serial, ['shell', 'rm -f /sdcard/adbmcp_ui.xml'])).catch(() => {});
-      return text(parseUiDump(xml.toString()));
+      const dumpOnce = async () => {
+        const st = (await adb(withSerial(serial, ['shell', 'uiautomator dump /sdcard/adbmcp_ui.xml 2>&1']))).toString();
+        if (!/dumped to/i.test(st) && /error/i.test(st)) throw new Error(`uiautomator: ${st.trim()}`);
+        const xml = (await adb(withSerial(serial, ['shell', 'cat /sdcard/adbmcp_ui.xml']))).toString();
+        await adb(withSerial(serial, ['shell', 'rm -f /sdcard/adbmcp_ui.xml'])).catch(() => {});
+        return xml;
+      };
+      const key = serial || '_default';
+      let xml = await dumpOnce();
+      if (lastUiDumpHash.get(key) === crypto.createHash('md5').update(xml).digest('hex')) {
+        // Идентичен предыдущему дампу — вероятен stale-кэш uiautomator после
+        // смены экрана. Даём UI устояться и дампим ещё раз.
+        await new Promise(r => setTimeout(r, 600));
+        xml = await dumpOnce();
+      }
+      lastUiDumpHash.set(key, crypto.createHash('md5').update(xml).digest('hex'));
+      return text(parseUiDump(xml));
     }
 
     case 'adb_tap': {
@@ -265,7 +284,7 @@ async function callTool(name, args) {
     case 'adb_install': {
       const apk = resolveSafeHostPath(args.apk_path);
       if (!fs.existsSync(apk)) throw new Error(`APK not found: ${apk}`);
-      const out = await adb(withSerial(serial, ['install', '-r', '-g', apk]), { timeout: 120000 });
+      const out = await adb(withSerial(serial, ['install', '-r', '-t', '-g', apk]), { timeout: 120000 });
       return text(out.trim());
     }
 
@@ -280,23 +299,45 @@ async function callTool(name, args) {
     case 'adb_push': {
       const src = resolveSafeHostPath(args.host_path);
       if (!fs.existsSync(src)) throw new Error(`File not found: ${src}`);
-      const out = await adb(withSerial(serial, ['push', src, args.device_path]), { timeout: 120000 });
-      return text(out.trim());
+      const size = fs.statSync(src).size;
+      // adb push пишет статистику в stderr, когда stdout не TTY — забираем оба
+      const r = await adb(withSerial(serial, ['push', src, args.device_path]), { timeout: 120000, withStderr: true });
+      const out = `${r.stdout}\n${r.stderr}`.trim();
+      return text(out || `Pushed ${src} -> ${args.device_path} (${size} bytes)`);
     }
 
     case 'adb_pull': {
       const dst = resolveSafeHostPath(args.host_path);
       fs.mkdirSync(path.dirname(dst), { recursive: true });
-      const out = await adb(withSerial(serial, ['pull', args.device_path, dst]), { timeout: 120000 });
-      return text(out.trim());
+      const r = await adb(withSerial(serial, ['pull', args.device_path, dst]), { timeout: 120000, withStderr: true });
+      const out = `${r.stdout}\n${r.stderr}`.trim();
+      let size = 0;
+      try { const st = fs.statSync(dst); size = st.isFile() ? st.size : 0; } catch {}
+      return text(out || `Pulled ${args.device_path} -> ${dst}${size ? ` (${size} bytes)` : ''}`);
     }
 
     case 'adb_logcat': {
       const lines = Math.min(args.lines || 200, 2000);
-      const a = ['logcat', '-d', '-t', String(lines)];
-      if (args.filter) a.push(...args.filter.split(/\s+/));
-      const out = await adb(withSerial(serial, a), { timeout: 20000 });
-      return text(out.toString().trim().slice(-64000) || '(empty)');
+      const raw = (args.filter || '').trim();
+      let out;
+      if (!raw) {
+        out = (await adb(withSerial(serial, ['logcat', '-d', '-t', String(lines)]), { timeout: 20000 })).toString();
+      } else if (/[:*]/.test(raw)) {
+        // filterspec: фильтруем ВЕСЬ буфер (-d), tail в JS. С -t N logcat сначала
+        // режет буфер до N сырых строк и только потом фильтрует (баг v0.2.0 —
+        // пустой вывод). Без записи *:S несматченные теги не глушатся — добавляем.
+        const spec = raw.split(/\s+/);
+        if (!spec.some(x => x.startsWith('*'))) spec.push('*:S');
+        out = (await adb(withSerial(serial, ['logcat', '-d', ...spec]), { timeout: 20000 })).toString();
+        out = out.trimEnd().split('\n').slice(-lines).join('\n');
+      } else {
+        // substring: полный дамп + регистронезависимый grep по всей строке
+        // (в v0.2.0 уходил как filterspec = no-op)
+        const dump = (await adb(withSerial(serial, ['logcat', '-d']), { timeout: 20000 })).toString();
+        const needle = raw.toLowerCase();
+        out = dump.split('\n').filter(l => l.toLowerCase().includes(needle)).slice(-lines).join('\n');
+      }
+      return text(out.trim().slice(-64000) || '(empty)');
     }
 
     default:
