@@ -15,13 +15,14 @@ export ALLOW_SHELL="${ALLOW_SHELL}"
 export HOME=/data
 mkdir -p /data/.android
 
-# adb-сервер слушает на всех интерфейсах: если в config.yaml проброшен порт
-# 5037, интеграция androidtv может использовать этот же сервер через
-# adb_server_ip и не воевать за прямое подключение к устройству.
-export ADB_SERVER_SOCKET=tcp:0.0.0.0:5037
-
-bashio::log.info "Starting adb server..."
-adb start-server
+# adb-сервер: флаг -a = слушать на всех интерфейсах, чтобы интеграция
+# androidtv могла использовать этот же сервер через проброшенный порт 5037.
+# Клиенты внутри контейнера ходят на localhost:5037 как обычно.
+# ADB_SERVER_SOCKET с tcp:0.0.0.0 здесь НЕ используется: он заставляет и
+# клиента коннектиться на 0.0.0.0 -> "cannot connect to daemon" (баг v0.1.0).
+bashio::log.info "Starting adb server (listening on all interfaces)..."
+adb -a -P 5037 server nodaemon > /tmp/adb-server.log 2>&1 &
+sleep 2
 
 # Автоподключение устройств из конфига (ip или ip:port)
 for host in $(bashio::config 'devices' 2>/dev/null); do
@@ -35,7 +36,7 @@ done
 
 adb devices -l
 
-bashio::log.info "Starting ADB MCP Server v0.1.0 on port 3199 (allow_shell: ${ALLOW_SHELL})"
+bashio::log.info "Starting ADB MCP Server v0.1.1 on port 3199 (allow_shell: ${ALLOW_SHELL})"
 node /server.js 3199 &
 
 sleep 2
