@@ -16,8 +16,31 @@ const os = require('os');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
+// v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
+// HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
+const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
+
+function fmtArgs(a) {
+  try {
+    const s = JSON.stringify(a || {});
+    return s.length > 300 ? s.slice(0, 300) + '…' : s;
+  } catch { return '(unserializable)'; }
+}
+
+function fmtOutcome(content) {
+  if (!Array.isArray(content) || !content.length) return 'ok';
+  const c = content[0];
+  if (c.type === 'image') return `image ${Math.round((c.data || '').length * 3 / 4 / 1024)}KB`;
+  const len = (c.text || '').length;
+  return `ok ${len}B`;
+}
+
+function logTool(name, args, t0, outcome) {
+  if (!LOG_REQUESTS) return;
+  console.log(`[tool] ${new Date().toISOString()} ${name} ${fmtArgs(args)} -> ${outcome} ${Date.now() - t0}ms`);
+}
 
 // push/pull ограничены этими корнями на стороне HA
 const FILE_ROOTS = ['/media', '/share'];
@@ -319,23 +342,26 @@ async function callTool(name, args) {
     case 'adb_logcat': {
       const lines = Math.min(args.lines || 200, 2000);
       const raw = (args.filter || '').trim();
+      // Экранирование для одинарных кавычек device-shell
+      const sq = x => `'${String(x).replace(/'/g, `'\\''`)}'`;
       let out;
       if (!raw) {
         out = (await adb(withSerial(serial, ['logcat', '-d', '-t', String(lines)]), { timeout: 20000 })).toString();
       } else if (/[:*]/.test(raw)) {
-        // filterspec: фильтруем ВЕСЬ буфер (-d), tail в JS. С -t N logcat сначала
-        // режет буфер до N сырых строк и только потом фильтрует (баг v0.2.0 —
-        // пустой вывод). Без записи *:S несматченные теги не глушатся — добавляем.
+        // filterspec: фильтр по ВСЕМУ буферу, tail НА УСТРОЙСТВЕ. С -t N logcat
+        // сначала режет буфер до N сырых строк и лишь потом фильтрует (баг
+        // v0.2.0 — пустой вывод). Без *:S несматченные теги не глушатся —
+        // добавляем. Tail device-side: болтливый тег на весь буфер не влезает
+        // в maxBuffer при переносе на хост (баг v0.2.1).
         const spec = raw.split(/\s+/);
         if (!spec.some(x => x.startsWith('*'))) spec.push('*:S');
-        out = (await adb(withSerial(serial, ['logcat', '-d', ...spec]), { timeout: 20000 })).toString();
-        out = out.trimEnd().split('\n').slice(-lines).join('\n');
+        const cmd = `logcat -d ${spec.map(sq).join(' ')} 2>/dev/null | tail -n ${lines}`;
+        out = (await adb(withSerial(serial, ['shell', cmd]), { timeout: 20000 })).toString();
       } else {
-        // substring: полный дамп + регистронезависимый grep по всей строке
-        // (в v0.2.0 уходил как filterspec = no-op)
-        const dump = (await adb(withSerial(serial, ['logcat', '-d']), { timeout: 20000 })).toString();
-        const needle = raw.toLowerCase();
-        out = dump.split('\n').filter(l => l.toLowerCase().includes(needle)).slice(-lines).join('\n');
+        // substring: регистронезависимый grep НА УСТРОЙСТВЕ (в v0.2.0 уходил
+        // как filterspec = no-op; в v0.2.1 полный дамп рвал maxBuffer)
+        const cmd = `logcat -d 2>/dev/null | grep -iF -- ${sq(raw)} | tail -n ${lines}`;
+        out = (await adb(withSerial(serial, ['shell', cmd]), { timeout: 20000 })).toString();
       }
       return text(out.trim().slice(-64000) || '(empty)');
     }
@@ -364,10 +390,13 @@ async function handleMcpRequest(body) {
   if (method === 'roots/list') return { jsonrpc: '2.0', id, result: { roots: [] } };
 
   if (method === 'tools/call') {
+    const t0 = Date.now();
     try {
       const content = await callTool(params.name, params.arguments || {});
+      logTool(params.name, params.arguments, t0, fmtOutcome(content));
       return { jsonrpc: '2.0', id, result: { content } };
     } catch (e) {
+      logTool(params.name, params.arguments, t0, `ERROR: ${e.message}`);
       return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true } };
     }
   }
@@ -418,5 +447,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  process.stderr.write(`ADB MCP Server v${VERSION} on port ${PORT} (shell ${ALLOW_SHELL ? 'enabled' : 'DISABLED'})\n`);
+  process.stderr.write(`ADB MCP Server v${VERSION} on port ${PORT} (shell ${ALLOW_SHELL ? 'enabled' : 'DISABLED'}, tool log ${LOG_REQUESTS ? 'ON' : 'off'})\n`);
 });
