@@ -4,12 +4,13 @@ MCP (Model Context Protocol) server for controlling Android devices over **netwo
 
 Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to SSE buffering in CDNs/tunnels). Auth: secret path prefix `/private_<token>`, same pattern as [ha-filesystem-mcp](https://github.com/st412m/ha-filesystem-mcp).
 
-## Tools (v0.1.0)
+## Tools (v0.2.0)
 
 | Tool | Purpose |
 |---|---|
 | `adb_devices` | List connected devices |
 | `adb_connect` / `adb_disconnect` | Manage network ADB connections |
+| `adb_pair` | Pair with Android 11+ devices (Wireless Debugging pairing code) |
 | `adb_shell` | Run shell commands (`settings`, `pm`, `am`, `dumpsys`, ...) |
 | `adb_screenshot` | Screenshot as JPEG (downscaled to 1280px) |
 | `adb_ui_dump` | Compact UI hierarchy with tap coordinates |
@@ -25,7 +26,7 @@ Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to 
 3. Enable ADB on your devices:
    - **Fire TV / Android TV**: Settings → My Fire TV → Developer Options → ADB Debugging → ON. Network ADB is always available on port 5555.
    - **Phones/tablets (Android ≤10)**: enable USB debugging, connect via USB once, run `adb tcpip 5555`. Resets on reboot.
-   - **Phones/tablets (Android 11+)**: Wireless debugging (pairing flow) — supported via `adb_shell`-level pairing, automation TBD.
+   - **Phones/tablets (Android 11+)**: Wireless debugging → "Pair device with pairing code", then use the `adb_pair` tool with the shown `ip:port` and 6-digit code, then `adb_connect` to the ip:port from the main Wireless debugging screen. Both ports are random and change after reboot.
 4. Add devices to the addon config to auto-connect on startup:
 
 ```yaml

@@ -15,7 +15,7 @@ const path = require('path');
 const os = require('os');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 
 // push/pull ограничены этими корнями на стороне HA
@@ -105,6 +105,14 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { host: { type: 'string' } }, required: ['host'] }
   },
   {
+    name: 'adb_pair',
+    description: 'Pair with an Android 11+ device over Wireless Debugging. On the device: Developer options -> Wireless debugging -> "Pair device with pairing code" shows ip:port and a 6-digit code. The pairing port is random and differs from the connect port; after pairing succeeds, call adb_connect with the ip:port shown on the main Wireless debugging screen.',
+    inputSchema: { type: 'object', properties: {
+      host: { type: 'string', description: 'ip:port from the pairing dialog (random port, NOT 5555)' },
+      code: { type: 'string', description: '6-digit pairing code from the dialog' }
+    }, required: ['host', 'code'] }
+  },
+  {
     name: 'adb_disconnect',
     description: 'Disconnect a network ADB device. Omit host to disconnect all.',
     inputSchema: { type: 'object', properties: { host: { type: 'string' } } }
@@ -183,6 +191,16 @@ async function callTool(name, args) {
     case 'adb_connect': {
       const host = args.host.includes(':') ? args.host : `${args.host}:5555`;
       const out = await adb(['connect', host], { timeout: 10000 });
+      return text(out.trim());
+    }
+
+    case 'adb_pair': {
+      // Wireless Debugging (Android 11+): порт pairing-диалога рандомный,
+      // дефолта нет — требуем ip:port явно. Код может прийти числом от
+      // MCP-клиента — приводим к строке.
+      if (!String(args.host).includes(':'))
+        throw new Error('Pairing requires ip:port — the random port from the "Pair device with pairing code" dialog (not 5555)');
+      const out = await adb(['pair', String(args.host), String(args.code)], { timeout: 20000 });
       return text(out.trim());
     }
 
