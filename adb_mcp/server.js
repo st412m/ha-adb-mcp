@@ -16,11 +16,22 @@ const os = require('os');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
+
+// v0.3.1: типовые ошибки adb дополняются подсказкой для вызывающего
+function friendlyAdbError(msg) {
+  if (/device '.*' not found|no devices\/emulators found/i.test(msg))
+    return `${msg}. Call adb_devices to list what is connected; network devices may need adb_connect first (wireless-debug ports change after phone reboot).`;
+  if (/device offline/i.test(msg))
+    return `${msg}. The TCP session died (device slept or rebooted) — run adb_disconnect for this host, then adb_connect again.`;
+  if (/device unauthorized|failed to authenticate/i.test(msg))
+    return `${msg}. Confirm the "Allow USB debugging?" RSA prompt on the device screen (check "Always allow").`;
+  return msg;
+}
 
 function fmtArgs(a) {
   try {
@@ -64,7 +75,7 @@ function adb(args, opts = {}) {
     }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || '').toString().trim() || err.message;
-        return reject(new Error(msg));
+        return reject(new Error(friendlyAdbError(msg)));
       }
       resolve(opts.withStderr ? { stdout, stderr } : stdout);
     });
@@ -219,8 +230,11 @@ async function callTool(name, args) {
 
     case 'adb_connect': {
       const host = args.host.includes(':') ? args.host : `${args.host}:5555`;
-      const out = await adb(['connect', host], { timeout: 10000 });
-      return text(out.trim());
+      const out = (await adb(['connect', host], { timeout: 10000 })).toString().trim();
+      // adb пишет неуспех коннекта в stdout с exit 0 — превращаем в ошибку
+      if (/failed to connect|unable to connect|cannot connect/i.test(out))
+        throw new Error(`${out}. Check the device is awake and the port is current (wireless-debug ports change after device reboot).`);
+      return text(out);
     }
 
     case 'adb_pair': {
