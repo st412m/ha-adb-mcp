@@ -16,7 +16,7 @@ const os = require('os');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.2.2';
+const VERSION = '0.3.0';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
@@ -153,8 +153,8 @@ const TOOLS = [
   },
   {
     name: 'adb_screenshot',
-    description: 'Take a screenshot of the device screen. Returns a JPEG image (downscaled to max 1280px wide) so Claude can see the UI.',
-    inputSchema: { type: 'object', properties: { serial: { type: 'string' } } }
+    description: 'Take a screenshot of the device screen. Returns a JPEG image so Claude can see the UI. Downscaled to max_px (default 1024) at JPEG quality (default 70); raise them only when fine detail matters.',
+    inputSchema: { type: 'object', properties: { serial: { type: 'string' }, quality: { type: 'number', description: 'JPEG quality 30-95, default 70' }, max_px: { type: 'number', description: 'Max dimension 320-1920, default 1024' } } }
   },
   {
     name: 'adb_ui_dump',
@@ -173,7 +173,7 @@ const TOOLS = [
   },
   {
     name: 'adb_text',
-    description: 'Type text into the focused input field.',
+    description: 'Type text into the focused input field. ASCII goes through input text; non-ASCII (cyrillic, emoji, CJK) is sent via the ADBKeyBoard IME (must be installed on the device: github.com/senzhk/ADBKeyBoard) — the current keyboard is temporarily switched and restored afterwards.',
     inputSchema: { type: 'object', properties: { text: { type: 'string' }, serial: { type: 'string' } }, required: ['text'] }
   },
   {
@@ -250,10 +250,12 @@ async function callTool(name, args) {
       try {
         const png = path.join(tmp, 'screen.png');
         const jpg = path.join(tmp, 'screen.jpg');
+        const q = Math.min(Math.max(Math.round(args.quality || 70), 30), 95);
+        const px = Math.min(Math.max(Math.round(args.max_px || 1024), 320), 1920);
         const raw = await adb(withSerial(serial, ['exec-out', 'screencap', '-p']), { binary: true });
         fs.writeFileSync(png, raw);
         await new Promise((res, rej) => execFile('convert', [
-          png, '-resize', '1280x1280>', '-quality', '80', jpg
+          png, '-resize', `${px}x${px}>`, '-quality', String(q), jpg
         ], e => e ? rej(e) : res()));
         return [{ type: 'image', data: fs.readFileSync(jpg).toString('base64'), mimeType: 'image/jpeg' }];
       } finally {
@@ -294,8 +296,28 @@ async function callTool(name, args) {
     }
 
     case 'adb_text': {
-      await adb(withSerial(serial, ['shell', `input text "${escapeInputText(args.text)}"`]));
-      return text(`Typed: ${args.text}`);
+      const t = String(args.text);
+      if (/^[\x20-\x7E]*$/.test(t)) {
+        await adb(withSerial(serial, ['shell', `input text "${escapeInputText(t)}"`]));
+        return text(`Typed: ${t}`);
+      }
+      // v0.3.0: не-ASCII через ADBKeyBoard (input text не умеет unicode).
+      // Порядок: проверить установку -> запомнить текущий IME -> переключить
+      // на AdbIME -> broadcast ADB_INPUT_B64 (base64 = shell-safe) -> вернуть IME.
+      const pkgs = (await adb(withSerial(serial, ['shell', 'pm list packages com.android.adbkeyboard']))).toString();
+      if (!pkgs.includes('com.android.adbkeyboard'))
+        throw new Error('Non-ASCII text requires ADBKeyBoard on the device. Install it (github.com/senzhk/ADBKeyBoard, pm install -r -t -g ADBKeyboard.apk from /data/local/tmp), then retry.');
+      const prevIme = (await adb(withSerial(serial, ['shell', 'settings get secure default_input_method']))).toString().trim();
+      const b64 = Buffer.from(t, 'utf8').toString('base64');
+      try {
+        await adb(withSerial(serial, ['shell', 'ime enable com.android.adbkeyboard/.AdbIME >/dev/null 2>&1; ime set com.android.adbkeyboard/.AdbIME']));
+        await new Promise(r => setTimeout(r, 700)); // IME-переключение асинхронное
+        await adb(withSerial(serial, ['shell', `am broadcast -a ADB_INPUT_B64 --es msg ${b64}`]));
+      } finally {
+        if (prevIme && prevIme !== 'null' && !prevIme.includes('adbkeyboard'))
+          await adb(withSerial(serial, ['shell', `ime set ${prevIme}`])).catch(() => {});
+      }
+      return text(`Typed (unicode via ADBKeyBoard): ${t}`);
     }
 
     case 'adb_key': {
