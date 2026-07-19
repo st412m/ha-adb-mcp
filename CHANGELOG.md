@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+- `adb_logcat` substring mode: fixed false matches on Fire OS — Amazon ships BSD grep 2.5.1-FreeBSD as `/system/bin/grep`, which matches *every* line after binary bytes in the logcat crash buffer (`-a` and `LC_ALL=C` don't help). The filter now prefers `toybox grep` when available (stock Android grep *is* toybox — no behavior change there)
+- `adb_logcat` substring mode: zero matches now return `(empty)` instead of an error
+- adb wrapper: stdout is no longer discarded on non-zero exit — shell pipeline failures now show the command output in the error message
+
 ## 0.3.1
 - Common adb errors (`device not found`, `device offline`, `unauthorized`) now carry actionable hints
 - `adb_connect` failures (`failed to connect`, host unreachable) raise a proper error instead of returning success text

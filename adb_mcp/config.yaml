@@ -1,6 +1,6 @@
 name: "ADB MCP Server"
 description: "MCP server for controlling Android devices over network ADB"
-version: "0.3.1"
+version: "0.3.2"
 slug: adb_mcp
 init: false
 arch:

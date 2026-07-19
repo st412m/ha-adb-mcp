@@ -16,7 +16,7 @@ const os = require('os');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
@@ -74,7 +74,11 @@ function adb(args, opts = {}) {
       encoding: opts.binary ? 'buffer' : 'utf8',
     }, (err, stdout, stderr) => {
       if (err) {
-        const msg = (stderr || '').toString().trim() || err.message;
+        // v0.3.2: не терять stdout при exit!=0 — при отладке shell-пайплайнов
+        // сообщение "Command failed: adb ..." без вывода команды бесполезно.
+        let msg = (stderr || '').toString().trim() || err.message;
+        const out = opts.binary ? '' : (stdout || '').toString().trim();
+        if (out) msg = `${msg}\nstdout (tail): ${out.slice(-2000)}`;
         return reject(new Error(friendlyAdbError(msg)));
       }
       resolve(opts.withStderr ? { stdout, stderr } : stdout);
@@ -395,8 +399,16 @@ async function callTool(name, args) {
         out = (await adb(withSerial(serial, ['shell', cmd]), { timeout: 20000 })).toString();
       } else {
         // substring: регистронезависимый grep НА УСТРОЙСТВЕ (в v0.2.0 уходил
-        // как filterspec = no-op; в v0.2.1 полный дамп рвал maxBuffer)
-        const cmd = `logcat -d 2>/dev/null | grep -iF -- ${sq(raw)} | tail -n ${lines}`;
+        // как filterspec = no-op; в v0.2.1 полный дамп рвал maxBuffer).
+        // v0.3.2: Fire OS подменяет /system/bin/grep на BSD grep 2.5.1-FreeBSD,
+        // который после бинарных байтов в crash-буфере logcat матчит ВСЁ
+        // (passthrough; -a и LC_ALL=C не лечат — смоук Fire TV 19.07). toybox
+        // grep исправен — используем его, когда доступен; иначе прежний grep
+        // (стоковый Android: /system/bin/grep И ЕСТЬ toybox — поведение не
+        // меняется). Финальный `:` — 0 совпадений это пустой результат
+        // "(empty)", а не ошибка exit 1.
+        const cmd = `G="grep"; command -v toybox >/dev/null 2>&1 && toybox grep --help >/dev/null 2>&1 && G="toybox grep"; ` +
+          `logcat -d 2>/dev/null | $G -iF -- ${sq(raw)} | tail -n ${lines}; :`;
         out = (await adb(withSerial(serial, ['shell', cmd]), { timeout: 20000 })).toString();
       }
       return text(out.trim().slice(-64000) || '(empty)');
