@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for controlling Android devices over **netwo
 
 Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to SSE buffering in CDNs/tunnels). Auth: secret path prefix `/private_<token>`, same pattern as [ha-filesystem-mcp](https://github.com/st412m/ha-filesystem-mcp).
 
-**Platforms:** built for `amd64`, `aarch64`, `armv7`. Developed and battle-tested on amd64 (HAOS); reports from other architectures are welcome — please open an issue.
+**Platforms:** built for amd64andaarch64. Developed and battle-tested on amd64 (HAOS); reports from other architectures are welcome — please open an issue. armv7 was dropped in 0.4.1: Home Assistant Supervisor deprecated the architecture (it warned on every install), and the arch-less base images are following suit.
 
 ## Tools (16)
 
