@@ -73,6 +73,15 @@ smoke() {
   else
     STREAM=broken-nonzero-exit
   fi
+
+  # Тот же стрим, но stdin — ПАЙП, а не файл. Именно эта форма (adb exec-out |
+  # magick png:- ... jpg:-) молча отдавала 0 байт в 0.3.3-0.3.5, тогда как
+  # вариант с файлом на stdin выше отрабатывает нормально.
+  if cat "$T/s.png" | "$IM" png:- -resize '64x64>' -quality 30 jpg:- > "$T/piped.jpg" 2>/dev/null; then
+    if [ -s "$T/piped.jpg" ]; then PIPED=ok; else PIPED=broken-empty-exit0; fi
+  else
+    PIPED=broken-nonzero-exit
+  fi
 }
 
 collect
@@ -86,7 +95,8 @@ case "${1:-runtime}" in
       echo "android-tools(adb): $ADB_V"
       echo "imagemagick: $IM_V (bin: $IM)"
       echo "screenshot-pipeline(file->file): ok"
-      echo "imagemagick-stream(png:- jpg:-): $STREAM"
+      echo "imagemagick-stream(stdin=file): $STREAM"
+      echo "imagemagick-stream(stdin=pipe): $PIPED"
     } > "$MANIFEST"
     echo "Toolchain OK -> $(tr '\n' '; ' < "$MANIFEST")"
     ;;
