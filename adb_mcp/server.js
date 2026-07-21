@@ -9,14 +9,13 @@
  */
 
 const http = require('http');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.3.2';
+const VERSION = '0.3.3';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
@@ -136,6 +135,75 @@ function parseUiDump(xml) {
 // Храним хэш последнего дампа per-serial: если новый дамп побайтово совпал с
 // предыдущим — ждём 600мс и дампим повторно (наблюдалось на S20 FE, смоук 18.07).
 const lastUiDumpHash = new Map();
+
+
+// v0.3.3: скриншот стримом adb -> convert, без посадки полнокадрового PNG в
+// память Node и без временных файлов. Причина: soak 20-21.07 показал храповик
+// ~3 MB RSS на каждый вызов (= размер raw-PNG screencap), +24 MB на серию из
+// 8 кадров без возврата после простоя — полнокадровый буфер `raw` и файловый
+// путь через mkdtemp удерживали память процесса. Теперь через JS проходит
+// только сжатый JPEG (десятки-сотни КБ): screencap пайпится в convert напрямую.
+function screenshotPipeline(serial, px, q) {
+  return new Promise((resolve, reject) => {
+    const a = spawn('adb', withSerial(serial, ['exec-out', 'screencap', '-p']),
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    // stdin convert = fd stdout adb: kernel-level pipe, PNG не проходит через
+    // Node вообще (a.stdout.pipe(c.stdin) гонял бы те же мегабайты через JS-кучу)
+    const c = spawn('convert',
+      ['png:-', '-resize', `${px}x${px}>`, '-quality', String(q), 'jpg:-'],
+      { stdio: [a.stdout, 'pipe', 'pipe'] });
+
+    const out = [];   // JPEG-чанки (малые)
+    const aErr = [];  // stderr adb (хвост)
+    const cErr = [];  // stderr convert (хвост)
+    let done = false;
+
+    const finish = (err, b64) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { a.kill('SIGKILL'); } catch {}
+      try { c.kill('SIGKILL'); } catch {}
+      err ? reject(err) : resolve(b64);
+    };
+
+    const timer = setTimeout(
+      () => finish(new Error('screenshot timed out (30s) — device offline or asleep?')),
+      ADB_TIMEOUT_MS);
+
+    a.on('error', e => finish(new Error(`adb spawn: ${e.message}`)));
+    c.on('error', e => finish(new Error(`convert spawn: ${e.message}`)));
+
+    a.stderr.on('data', d => { if (aErr.length < 16) aErr.push(d); });
+    c.stderr.on('data', d => { if (cErr.length < 16) cErr.push(d); });
+
+    a.on('close', code => {
+      if (code !== 0)
+        finish(new Error(friendlyAdbError(
+          Buffer.concat(aErr).toString().trim() || `adb exited ${code}`)));
+    });
+
+    c.stdout.on('data', d => out.push(d));
+    c.on('close', code => {
+      if (done) return;
+      if (code !== 0) {
+        // Гонка close-событий: convert падает от EOF/мусора РАНЬШЕ, чем
+        // обработается close от adb — но настоящая причина в stderr adb
+        // (device not found / offline / unauthorized). Он приоритетнее.
+        const adbMsg = Buffer.concat(aErr).toString().trim();
+        if (adbMsg) return finish(new Error(friendlyAdbError(adbMsg)));
+        return finish(new Error(
+          `convert exited ${code}: ${Buffer.concat(cErr).toString().trim() || '(no stderr)'} ` +
+          `(screencap produced no valid PNG — device asleep or protected content?)`));
+      }
+      const jpg = Buffer.concat(out);
+      if (!jpg.length)
+        return finish(new Error(friendlyAdbError(
+          'empty screenshot' + (aErr.length ? `: ${Buffer.concat(aErr).toString().trim()}` : ''))));
+      finish(null, jpg.toString('base64'));
+    });
+  });
+}
 
 const TOOLS = [
   {
@@ -264,21 +332,10 @@ async function callTool(name, args) {
     }
 
     case 'adb_screenshot': {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'adbmcp-'));
-      try {
-        const png = path.join(tmp, 'screen.png');
-        const jpg = path.join(tmp, 'screen.jpg');
-        const q = Math.min(Math.max(Math.round(args.quality || 70), 30), 95);
-        const px = Math.min(Math.max(Math.round(args.max_px || 1024), 320), 1920);
-        const raw = await adb(withSerial(serial, ['exec-out', 'screencap', '-p']), { binary: true });
-        fs.writeFileSync(png, raw);
-        await new Promise((res, rej) => execFile('convert', [
-          png, '-resize', `${px}x${px}>`, '-quality', String(q), jpg
-        ], e => e ? rej(e) : res()));
-        return [{ type: 'image', data: fs.readFileSync(jpg).toString('base64'), mimeType: 'image/jpeg' }];
-      } finally {
-        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-      }
+      const q = Math.min(Math.max(Math.round(args.quality || 70), 30), 95);
+      const px = Math.min(Math.max(Math.round(args.max_px || 1024), 320), 1920);
+      const data = await screenshotPipeline(serial, px, q);
+      return [{ type: 'image', data, mimeType: 'image/jpeg' }];
     }
 
     case 'adb_ui_dump': {
