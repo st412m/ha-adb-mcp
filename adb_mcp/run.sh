@@ -9,6 +9,10 @@ export LOG_REQUESTS="${LOG_REQUESTS}"
 ALLOW_SHELL=$(bashio::config 'allow_shell' 2>/dev/null || echo "true")
 export ALLOW_SHELL="${ALLOW_SHELL}"
 
+# Версии внешних утилит в логе с первой секунды: 21.07.2026 три релиза подряд
+# были сломаны поведением тулчейна, а не кода, и диагностика шла вслепую.
+bashio::log.info "Toolchain: $(/toolchain-check.sh runtime)"
+
 # Критично: ADB RSA-ключи должны переживать рестарты аддона, иначе
 # устройство будет заново спрашивать "Allow USB debugging?" после каждого
 # обновления. HOME=/data -> ключи в /data/.android/adbkey (persistent volume).
