@@ -15,7 +15,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.3.4';
+const VERSION = '0.3.5';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
@@ -137,29 +137,36 @@ function parseUiDump(xml) {
 const lastUiDumpHash = new Map();
 
 
-// v0.3.4: скриншот через shell-пайплайн `adb exec-out screencap | convert`.
-// Полнокадровый PNG (~3 MB) идёт по kernel pipe между adb и convert и НЕ
-// заходит в Node вообще — в JS попадает только сжатый JPEG со stdout convert.
-// Причина: soak 20-21.07 показал храповик ~3 MB RSS на вызов (полнокадровый
-// буфер `raw` + временные файлы в v<=0.3.2 удерживали память процесса).
-// Вариант v0.3.3 с fd-passing (stdio: [a.stdout, ...]) отброшен: известная
-// гонка nodejs/node#9413 — на Alpine convert стабильно не получал данные
-// (exit 0, пустой stdout). Shell-пайплайн переносим и детерминирован;
-// pipefail не нужен: при падении adb convert получает EOF/мусор и выходит
-// с ошибкой, причина видна в общем stderr.
+// v0.3.5: скриншот через shell-пайплайн `adb exec-out screencap | magick`.
+// Полнокадровый PNG (~3 MB) идёт по kernel pipe между adb и конвертером и НЕ
+// заходит в Node вообще — в JS попадает только сжатый JPEG со stdout (фикс
+// утечки ~3 MB/кадр из soak 20-21.07; буферный вариант v<=0.3.2 удерживал
+// память, fd-passing v0.3.3 не работал на Alpine, см. wiki).
+// IM7 (Alpine >= 2026): `convert` — deprecated-путь с warning в stderr;
+// предпочитаем `magick`, фолбэк на `convert` для старых образов/IM6.
+// Ошибки: exit-код и сигнал видны всегда (v0.3.4 маскировал их stderr-ом),
+// deprecation-warning отфильтрован из сообщений как шум.
 function screenshotPipeline(serial, px, q) {
   return new Promise((resolve, reject) => {
     const sq = x => `'${String(x).replace(/'/g, `'\\''`)}'`;
-    const cmd = `adb ${serial ? `-s ${sq(serial)} ` : ''}exec-out screencap -p | ` +
-      `convert png:- -resize ${sq(px + 'x' + px + '>')} -quality ${q} jpg:-`;
+    const cmd = `IM=convert; command -v magick >/dev/null 2>&1 && IM=magick; ` +
+      `adb ${serial ? `-s ${sq(serial)} ` : ''}exec-out screencap -p | ` +
+      `$IM png:- -resize ${sq(px + 'x' + px + '>')} -quality ${q} jpg:-`;
     execFile('sh', ['-c', cmd], {
       timeout: ADB_TIMEOUT_MS,
       maxBuffer: ADB_MAX_BUFFER,
       encoding: 'buffer',
     }, (err, stdout, stderr) => {
-      // stderr общий у adb и convert — friendlyAdbError матчит adb-паттерны
-      const errTxt = (stderr || '').toString().trim();
-      if (err) return reject(new Error(friendlyAdbError(errTxt || err.message)));
+      // stderr общий у adb и конвертера — friendlyAdbError матчит adb-паттерны
+      const errTxt = (stderr || '').toString().split('\n')
+        .filter(l => l.trim() && !/deprecated in IMv7/i.test(l))
+        .join('\n').trim();
+      if (err) {
+        const why = err.killed ? `killed${err.signal ? ' by ' + err.signal : ''} (timeout?)`
+          : `pipeline exit ${err.code}`;
+        return reject(new Error(friendlyAdbError(
+          errTxt ? `${errTxt} [${why}]` : `${why}: ${err.message}`)));
+      }
       if (!stdout || !stdout.length)
         return reject(new Error(friendlyAdbError(errTxt ||
           'empty screenshot (screencap produced no data — device asleep or protected content?)')));
