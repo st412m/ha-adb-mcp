@@ -10,8 +10,8 @@
 # секунды, а нерабочий конвейер ловится на сборке, а не в бою.
 set -eu
 
-# Ожидаемые мажоры (Alpine 3.21-stable на 2026-07-21:
-# nodejs 22.23.0-r0, android-tools 35.0.2-r7, imagemagick 7.1.1.41-r0).
+# Ожидаемые мажоры (Alpine 3.22-stable на 2026-07-21, сверено по aports:
+# nodejs 22.23.0-r0, android-tools 35.0.2-r16, imagemagick 7.1.2.15-r0).
 # Патчи внутри ветки допустимы, смена мажора — нет.
 EXPECT_NODE_MAJOR=22
 EXPECT_IM_MAJOR=7
