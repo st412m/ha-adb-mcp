@@ -9,13 +9,13 @@
  */
 
 const http = require('http');
-const { execFile, spawn } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.argv[2] || '3199');
-const VERSION = '0.3.3';
+const VERSION = '0.3.4';
 const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js.
 // HTTP-уровень показывает только "POST /mcp" — для отладки нужен уровень тулов.
@@ -137,70 +137,33 @@ function parseUiDump(xml) {
 const lastUiDumpHash = new Map();
 
 
-// v0.3.3: скриншот стримом adb -> convert, без посадки полнокадрового PNG в
-// память Node и без временных файлов. Причина: soak 20-21.07 показал храповик
-// ~3 MB RSS на каждый вызов (= размер raw-PNG screencap), +24 MB на серию из
-// 8 кадров без возврата после простоя — полнокадровый буфер `raw` и файловый
-// путь через mkdtemp удерживали память процесса. Теперь через JS проходит
-// только сжатый JPEG (десятки-сотни КБ): screencap пайпится в convert напрямую.
+// v0.3.4: скриншот через shell-пайплайн `adb exec-out screencap | convert`.
+// Полнокадровый PNG (~3 MB) идёт по kernel pipe между adb и convert и НЕ
+// заходит в Node вообще — в JS попадает только сжатый JPEG со stdout convert.
+// Причина: soak 20-21.07 показал храповик ~3 MB RSS на вызов (полнокадровый
+// буфер `raw` + временные файлы в v<=0.3.2 удерживали память процесса).
+// Вариант v0.3.3 с fd-passing (stdio: [a.stdout, ...]) отброшен: известная
+// гонка nodejs/node#9413 — на Alpine convert стабильно не получал данные
+// (exit 0, пустой stdout). Shell-пайплайн переносим и детерминирован;
+// pipefail не нужен: при падении adb convert получает EOF/мусор и выходит
+// с ошибкой, причина видна в общем stderr.
 function screenshotPipeline(serial, px, q) {
   return new Promise((resolve, reject) => {
-    const a = spawn('adb', withSerial(serial, ['exec-out', 'screencap', '-p']),
-      { stdio: ['ignore', 'pipe', 'pipe'] });
-    // stdin convert = fd stdout adb: kernel-level pipe, PNG не проходит через
-    // Node вообще (a.stdout.pipe(c.stdin) гонял бы те же мегабайты через JS-кучу)
-    const c = spawn('convert',
-      ['png:-', '-resize', `${px}x${px}>`, '-quality', String(q), 'jpg:-'],
-      { stdio: [a.stdout, 'pipe', 'pipe'] });
-
-    const out = [];   // JPEG-чанки (малые)
-    const aErr = [];  // stderr adb (хвост)
-    const cErr = [];  // stderr convert (хвост)
-    let done = false;
-
-    const finish = (err, b64) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { a.kill('SIGKILL'); } catch {}
-      try { c.kill('SIGKILL'); } catch {}
-      err ? reject(err) : resolve(b64);
-    };
-
-    const timer = setTimeout(
-      () => finish(new Error('screenshot timed out (30s) — device offline or asleep?')),
-      ADB_TIMEOUT_MS);
-
-    a.on('error', e => finish(new Error(`adb spawn: ${e.message}`)));
-    c.on('error', e => finish(new Error(`convert spawn: ${e.message}`)));
-
-    a.stderr.on('data', d => { if (aErr.length < 16) aErr.push(d); });
-    c.stderr.on('data', d => { if (cErr.length < 16) cErr.push(d); });
-
-    a.on('close', code => {
-      if (code !== 0)
-        finish(new Error(friendlyAdbError(
-          Buffer.concat(aErr).toString().trim() || `adb exited ${code}`)));
-    });
-
-    c.stdout.on('data', d => out.push(d));
-    c.on('close', code => {
-      if (done) return;
-      if (code !== 0) {
-        // Гонка close-событий: convert падает от EOF/мусора РАНЬШЕ, чем
-        // обработается close от adb — но настоящая причина в stderr adb
-        // (device not found / offline / unauthorized). Он приоритетнее.
-        const adbMsg = Buffer.concat(aErr).toString().trim();
-        if (adbMsg) return finish(new Error(friendlyAdbError(adbMsg)));
-        return finish(new Error(
-          `convert exited ${code}: ${Buffer.concat(cErr).toString().trim() || '(no stderr)'} ` +
-          `(screencap produced no valid PNG — device asleep or protected content?)`));
-      }
-      const jpg = Buffer.concat(out);
-      if (!jpg.length)
-        return finish(new Error(friendlyAdbError(
-          'empty screenshot' + (aErr.length ? `: ${Buffer.concat(aErr).toString().trim()}` : ''))));
-      finish(null, jpg.toString('base64'));
+    const sq = x => `'${String(x).replace(/'/g, `'\\''`)}'`;
+    const cmd = `adb ${serial ? `-s ${sq(serial)} ` : ''}exec-out screencap -p | ` +
+      `convert png:- -resize ${sq(px + 'x' + px + '>')} -quality ${q} jpg:-`;
+    execFile('sh', ['-c', cmd], {
+      timeout: ADB_TIMEOUT_MS,
+      maxBuffer: ADB_MAX_BUFFER,
+      encoding: 'buffer',
+    }, (err, stdout, stderr) => {
+      // stderr общий у adb и convert — friendlyAdbError матчит adb-паттерны
+      const errTxt = (stderr || '').toString().trim();
+      if (err) return reject(new Error(friendlyAdbError(errTxt || err.message)));
+      if (!stdout || !stdout.length)
+        return reject(new Error(friendlyAdbError(errTxt ||
+          'empty screenshot (screencap produced no data — device asleep or protected content?)')));
+      resolve(stdout.toString('base64'));
     });
   });
 }
