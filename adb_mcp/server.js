@@ -29,6 +29,8 @@ function friendlyAdbError(msg) {
     return `${msg}. The TCP session died (device slept or rebooted) — run adb_disconnect for this host, then adb_connect again.`;
   if (/device unauthorized|failed to authenticate/i.test(msg))
     return `${msg}. Confirm the "Allow USB debugging?" RSA prompt on the device screen (check "Always allow").`;
+  if (/INSTALL_FAILED_VERIFICATION_FAILURE/i.test(msg))
+    return `${msg}. The on-device package verifier rejects ADB installs — disable it once via adb_shell: settings put global verifier_verify_adb_installs 0`;
   return msg;
 }
 
@@ -63,6 +65,24 @@ function resolveSafeHostPath(p) {
   if (!FILE_ROOTS.some(root => resolved === root || resolved.startsWith(root + '/')))
     throw new Error(`Access denied (host path outside ${FILE_ROOTS.join(', ')}): ${p}`);
   return resolved;
+}
+
+// v0.5.1: MCP-клиент claude.ai сериализует array-параметры JSON-строками
+// (тот же баг, что ha-filesystem-mcp issue #2, фикс 2.2.2). Без коэрсии
+// массив путей приходит одной строкой '["/media/…","/media/…"]', падает в
+// resolveSafeHostPath — install-multiple недостижим с веб/desktop-клиента.
+function coerceArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (s.startsWith('[') && s.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* не JSON — трактуем как одиночный путь */ }
+    }
+  }
+  return [v];
 }
 
 function adb(args, opts = {}) {
@@ -383,7 +403,7 @@ async function callTool(name, args) {
       // сброса: `pm path <pkg>` отдаёт весь набор → adb_pull → сюда массивом.
       // Выбор нужных сплитов по ABI (ro.product.cpu.abilist) и плотности (wm density)
       // делает вызывающая сторона — bundletool в контейнере не нужен.
-      const rawPaths = Array.isArray(args.apk_path) ? args.apk_path : [args.apk_path];
+      const rawPaths = coerceArray(args.apk_path).filter(p => typeof p === 'string' && p.trim() !== '');
       if (rawPaths.length === 0) throw new Error('apk_path is empty');
       const apks = rawPaths.map(p => {
         const r = resolveSafeHostPath(p);
