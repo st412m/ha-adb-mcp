@@ -242,8 +242,8 @@ const TOOLS = [
   },
   {
     name: 'adb_install',
-    description: 'Install an APK from HA filesystem (/media or /share, e.g. /media/VAULT/apk/app.apk). Flags -r (reinstall), -t (allow testOnly/debug builds) and -g (grant all permissions) applied by default.',
-    inputSchema: { type: 'object', properties: { apk_path: { type: 'string' }, serial: { type: 'string' } }, required: ['apk_path'] }
+    description: 'Install an APK from HA filesystem (/media or /share). apk_path accepts a single path, OR an array of split-APK paths (base.apk + config.*.apk) which are installed atomically via install-multiple. Flags -r (reinstall), -t (allow testOnly/debug builds) and -g (grant all permissions) applied by default.',
+    inputSchema: { type: 'object', properties: { apk_path: { type: ['string', 'array'], items: { type: 'string' }, description: 'Single APK path, or array of split-APK paths for install-multiple (e.g. base + config.arm64_v8a + config.xxhdpi + config.<lang>). Restore-after-reset: `pm path <pkg>` lists the full installed set -> adb_pull each -> pass them here as an array.' }, serial: { type: 'string' } }, required: ['apk_path'] }
   },
   {
     name: 'adb_uninstall',
@@ -378,10 +378,21 @@ async function callTool(name, args) {
     }
 
     case 'adb_install': {
-      const apk = resolveSafeHostPath(args.apk_path);
-      if (!fs.existsSync(apk)) throw new Error(`APK not found: ${apk}`);
-      const out = await adb(withSerial(serial, ['install', '-r', '-t', '-g', apk]), { timeout: 120000 });
-      return text(out.trim());
+      // v0.5.0: apk_path — строка ИЛИ массив путей. Массив (>1) → install-multiple:
+      // атомарная установка split-APK (base.apk + config.*). Восстановление после
+      // сброса: `pm path <pkg>` отдаёт весь набор → adb_pull → сюда массивом.
+      // Выбор нужных сплитов по ABI (ro.product.cpu.abilist) и плотности (wm density)
+      // делает вызывающая сторона — bundletool в контейнере не нужен.
+      const rawPaths = Array.isArray(args.apk_path) ? args.apk_path : [args.apk_path];
+      if (rawPaths.length === 0) throw new Error('apk_path is empty');
+      const apks = rawPaths.map(p => {
+        const r = resolveSafeHostPath(p);
+        if (!fs.existsSync(r)) throw new Error(`APK not found: ${r}`);
+        return r;
+      });
+      const verb = apks.length > 1 ? 'install-multiple' : 'install';
+      const out = await adb(withSerial(serial, [verb, '-r', '-t', '-g', ...apks]), { timeout: 180000 });
+      return text(out.trim() || `${verb}: ${apks.length} file(s) OK`);
     }
 
     case 'adb_uninstall': {
