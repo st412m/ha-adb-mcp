@@ -4,7 +4,17 @@ MCP (Model Context Protocol) server for controlling Android devices over **netwo
 
 Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to SSE buffering in CDNs/tunnels). Auth: secret path prefix `/private_<token>`, same pattern as [ha-filesystem-mcp](https://github.com/st412m/ha-filesystem-mcp).
 
-**Platforms:** built for amd64andaarch64. Developed and battle-tested on amd64 (HAOS); reports from other architectures are welcome — please open an issue. armv7 was dropped in 0.4.1: Home Assistant Supervisor deprecated the architecture (it warned on every install), and the arch-less base images are following suit.
+**Platforms:** built for `amd64` and `aarch64`. Developed and battle-tested on amd64 (HAOS). aarch64 has been confirmed by an external tester on a Raspberry Pi 4 (HAOS bare metal): clean build, clean start, all screenshot-pipeline smokes pass — though the ADB tools themselves were not exercised there (no Android device on that setup). `armv7` was dropped in 0.4.1 after Supervisor deprecated it.
+
+> ⚠ **ADB is not a sandbox.** Several operations exposed here are destructive and some are irreversible without a factory reset — `adb_uninstall` removes app data, `pm disable-user`/`pm uninstall --user 0` on system packages can leave a device in a broken or unbootable state, and an AI assistant will execute what it is asked to. Start with `allow_shell: false` if you only need screenshots and UI control, and keep a way to recover each device.
+
+## Why not the official MCP Server integration?
+
+Home Assistant ships its own MCP Server integration, and it is the right tool for a different job. It exposes the **HA conversation agent** — the intents your assistant already understands (turn on a light, set a temperature). It does not give an assistant a shell, a screen, or a package manager on a device.
+
+This addon is at a different layer. It talks to Android over ADB directly, so the assistant can do the things HA has no entity for: read a crash log, dump the current UI tree and tap a coordinate, sideload an APK, disable a preinstalled package, pull a file off the box. If your device happens to be an Android TV that HA already tracks via the `androidtv` integration, the two coexist (see below) — this addon simply operates below the level where entities exist.
+
+Rule of thumb: if what you want is an entity, use the official integration. If what you want is a terminal and a screen, use this.
 
 ## Tools (16)
 
@@ -19,10 +29,33 @@ Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to 
 | `adb_ui_dump` | Compact UI hierarchy with tap coordinates | Auto-retries once (600 ms) if uiautomator returns a stale cached dump |
 | `adb_tap` / `adb_swipe` / `adb_key` | Input control | Key names or keycodes (`HOME`, `BACK`, `WAKEUP`, …) |
 | `adb_text` | Type into focused field | ASCII via `input text`; **non-ASCII (Cyrillic/emoji/CJK) via ADBKeyBoard** — see below |
-| `adb_install` | Install APK from `/media` or `/share` | Flags `-r -t -g`: reinstall, testOnly/debug builds allowed, permissions granted |
+| `adb_install` | Install APK(s) from `/media` or `/share` | One path → `adb install`. **Array of paths → `adb install-multiple`** for split APKs. Flags `-r -t -g` |
 | `adb_uninstall` | Uninstall by package name | `keep_data` optional |
 | `adb_push` / `adb_pull` | File transfer device ↔ HA | HA side restricted to `/media`, `/share`; returns transfer stats |
 | `adb_logcat` | Non-blocking log dump | See filter semantics below |
+
+### Split APKs (`install-multiple`)
+
+Apps distributed as `.apks`/`.xapk` bundles are a base APK plus `config.*` splits. `adb` refuses the bundle itself (`filename doesn't end .apk`), and unpacking it on-device is not an option — Fire OS 7, for one, ships no `unzip`. Unpack on your PC, drop the parts into `/media`, and pass the ones the device actually needs:
+
+```
+adb_install apk_path=[
+  "/media/apk/X-plore/com.lonelycatgames.Xplore.apk",
+  "/media/apk/X-plore/config.armeabi_v7a.apk",
+  "/media/apk/X-plore/config.xhdpi.apk",
+  "/media/apk/X-plore/config.ru.apk"
+]
+```
+
+Picking the splits is the caller's job — there is no bundletool in the container. Ask the device first:
+
+```
+adb_shell getprop ro.product.cpu.abilist   # armeabi-v7a,armeabi → 32-bit, do NOT ship arm64
+adb_shell wm density                       # 320 → xhdpi
+adb_shell getprop persist.sys.locale       # ru-RU → config.ru
+```
+
+Don't infer the ABI from the SoC or the Android version: plenty of Android TV boxes run a 32-bit userland on 64-bit silicon. To restore an app after a factory reset, `pm path <pkg>` on a working device lists the exact split set — pull those and pass them straight back.
 
 ### `adb_logcat` filter semantics
 
@@ -75,7 +108,13 @@ Expose port 3200 through your reverse proxy (Caddy/nginx/Cloudflare Tunnel), the
 https://your-domain/private_<token>/mcp
 ```
 
-Note: claude.ai caches the tool list per chat — after updating the addon, start a new chat to see new tools/schemas.
+## Known limitations
+
+- **Tool list is cached per chat.** After updating the addon, an already-open chat keeps the old tool schemas. Start a new one to see new tools or changed parameters. (As of 0.5.1 an array parameter still works even against a stale string schema — the server coerces it — but the description you see will be outdated.)
+- **Gateway timeout ~60 s per tool call.** Long-running shell commands will be cut off by the connector, not by the addon. Background them on-device and poll, rather than blocking.
+- **aarch64 is build-verified, not device-verified.** See Platforms above.
+- **Screenshots wake devices.** `screencap` on a sleeping Android TV wakes it, and HDMI-CEC will happily switch on the television attached to it. Worth remembering before scripting a screenshot loop.
+- **One adb session per device.** Android's adbd does not tolerate two independent TCP clients; if you also use the `androidtv` integration, route it through this addon's adb server — see below.
 
 ## Coexistence with the androidtv integration
 
@@ -90,7 +129,21 @@ Heads-up: `adb_server_ip` is not in the integration's options flow — switching
 | `token` | `changeme` | Secret path token. **Change it.** |
 | `devices` | `[]` | List of `ip` or `ip:port` to auto-connect at startup. Don't list Android 11+ wireless-debug devices (random ports) |
 | `allow_shell` | `true` | `false` disables the raw `adb_shell` tool. Internal plumbing (ui_dump, unicode input, logcat filters) keeps working |
-| `log_requests` | `false` | Two logs at once: HTTP access log in the auth proxy (IP, method, masked path, status) **and** per-tool-call log in the server (`[tool] <ISO> <name> <args> -> ok NB | image NKB | ERROR <msg> <ms>`) |
+| `log_requests` | `false` | Two logs at once: HTTP access log in the auth proxy (IP, method, masked path, status) **and** per-tool-call log in the server (`[tool] <ISO> <name> <args> -> ok NB \| image NKB \| ERROR <msg> <ms>`) |
+
+## Troubleshooting
+
+**`INSTALL_FAILED_VERIFICATION_FAILURE`** — the on-device package verifier is rejecting ADB installs. It is a separate switch from `package_verifier_enable`, and its default (unset) means *enabled*:
+
+```
+adb_shell settings put global verifier_verify_adb_installs 0
+```
+
+Seen on certified Android TV devices with Play Services. Devices without Play Protect (Fire OS, for instance) never hit this regardless of the setting, because there is no verifier agent to consult.
+
+**App looks dead right after an install** — after a replace, dexopt runs before the first launch, so the process can take noticeably longer than usual to appear. Check logcat for an actual `FATAL` before concluding it crashed. `VerityUtils: Failed to measure fs-verity` in the log after a sideload is normal, not an error.
+
+**`device offline` / `device not found`** — the TCP session died (device slept or rebooted). `adb_disconnect` that host, then `adb_connect` again. For Android 11+ wireless debugging, the port changes after every reboot.
 
 ## Security notes
 
@@ -101,4 +154,4 @@ Heads-up: `adb_server_ip` is not in the integration's options flow — switching
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
