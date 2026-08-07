@@ -71,12 +71,27 @@ function writeState(args, serial, state) {
 
 // ------------------------------------------------------------------ утилиты
 
+/**
+ * Версия и ABI пакета.
+ *
+ * ⚠ 1.1.1: было `grep -m2`. В выводе `dumpsys package` первыми идут
+ * `primaryCpuAbi=` и `versionCode=`, так что лимит в две строки срезал
+ * `versionName=` ДО того, как он встретится — поле было пустым везде:
+ * в action=info, в выводе backup и в manifest.json (т.е. в единственном
+ * документе, по которому восстанавливается удалённое приложение).
+ * versionCode берётся первый — у `dumpsys` есть второй блок
+ * "Hidden system packages" со СТАРОЙ версией для обновлённых
+ * системных пакетов, и брать оттуда нельзя.
+ */
 async function packageVersion(serial, pkg) {
   const out = await adbSh(serial,
-    `dumpsys package ${sq(pkg)} 2>/dev/null | grep -m2 -E "versionCode=|versionName=|primaryCpuAbi="`);
+    `dumpsys package ${sq(pkg)} 2>/dev/null | grep -E "versionCode=|versionName=|primaryCpuAbi=" | head -n 20`);
   const code = (out.match(/versionCode=(\d+)/) || [])[1] || '0';
-  const name = (out.match(/versionName=([^\s]+)/) || [])[1] || '';
-  const abi = (out.match(/primaryCpuAbi=([^\s]+)/) || [])[1] || '';
+  const abi = (out.match(/primaryCpuAbi=(\S+)/) || [])[1] || '';
+  // versionName занимает строку целиком и может содержать пробелы
+  // ("1.0 beta"), но на части прошивок рядом дописаны другие поля.
+  let name = ((out.match(/versionName=(.*)/) || [])[1] || '').trim();
+  if (/\s[A-Za-z_]\w*=/.test(name)) name = name.split(/\s+/)[0];
   return { versionCode: code, versionName: name, primaryCpuAbi: abi };
 }
 
@@ -119,7 +134,7 @@ async function backupPackage(serial, pkg, args, props) {
     primaryCpuAbi: ver.primaryCpuAbi,
     splits: files.map(f => f.name),
     files,
-    device: { serial, model: props.model, sdk: props.sdk, density: props.density, locale: props.locale },
+    device: { serial, model: props.model, sdk: props.sdk, density: props.density, locale: props.locale, abilist: props.abilist },
     pulled_at: new Date().toISOString(),
   };
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
