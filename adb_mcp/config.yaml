@@ -1,6 +1,6 @@
 name: "ADB MCP Server"
 description: "MCP server for controlling Android devices over network ADB"
-version: "1.0.0"
+version: "1.1.0"
 slug: adb_mcp
 init: false
 arch:
@@ -18,10 +18,12 @@ options:
   log_requests: false
   token: "changeme"
   allow_shell: true
+  allow_uninstall: false
   devices: []
 schema:
   log_requests: bool
   token: str
   allow_shell: bool
+  allow_uninstall: bool
   devices:
     - str

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Проверка тулчейна аддона. Запускается ДВАЖДЫ:
-#   /toolchain-check.sh build    — на сборке образа: падает, если версии ушли
-#                                  или если конвейер скриншота не работает
+#   /toolchain-check.sh build    — на сборке образа: падает, если версии ушли,
+#                                  если конвейер скриншота не работает или
+#                                  если недостаёт модуля сервера
 #   /toolchain-check.sh runtime  — на старте: печатает баннер версий в лог
 #
 # Зачем: 21.07.2026 три релиза подряд (0.3.3-0.3.5) были сломаны в проде из-за
@@ -16,6 +17,11 @@ set -eu
 EXPECT_NODE_MAJOR=22
 EXPECT_IM_MAJOR=7
 EXPECT_ADB_MAJOR=35
+
+# Модули сервера (1.1.0+). Список продублирован в Dockerfile строками COPY —
+# держать синхронно. Забытый COPY = падение на require() в бою, поэтому
+# проверяется на сборке.
+MODULES="proxy.js server.js registry.js adb.js device.js session.js ui.js files.js apps.js"
 
 MANIFEST=/toolchain.txt
 
@@ -49,6 +55,32 @@ guard() {
     echo "Сборка остановлена: Alpine отдал не тот тулчейн, на котором аддон" >&2
     echo "проверен. Прогони adb_screenshot вручную, убедись что всё работает," >&2
     echo "и обнови EXPECT_*_MAJOR в toolchain-check.sh." >&2
+    exit 1
+  fi
+}
+
+# Модули: файл на месте + синтаксис + реальный импорт всего графа зависимостей.
+# require('/registry.js') тянет session/ui/files/apps -> любой забытый COPY
+# или опечатка в имени модуля падают здесь, а не у пользователя в рантайме.
+modules_guard() {
+  for m in $MODULES; do
+    if [ ! -f "/$m" ]; then
+      echo "MODULE GUARD: /$m отсутствует в образе — забыта строка COPY в Dockerfile" >&2
+      exit 1
+    fi
+    if ! node --check "/$m" >/dev/null 2>&1; then
+      echo "MODULE GUARD: синтаксическая ошибка в /$m" >&2
+      node --check "/$m" >&2 || true
+      exit 1
+    fi
+  done
+  TOOL_COUNT=$(node -e 'process.stdout.write(String(require("/registry.js").TOOLS.length))' 2>/dev/null) || {
+    echo "MODULE GUARD: /registry.js не импортируется — сломан граф require" >&2
+    node -e 'require("/registry.js")' >&2 || true
+    exit 1
+  }
+  if [ -z "$TOOL_COUNT" ] || [ "$TOOL_COUNT" -lt 1 ] 2>/dev/null; then
+    echo "MODULE GUARD: реестр инструментов пуст" >&2
     exit 1
   fi
 }
@@ -88,12 +120,14 @@ collect
 case "${1:-runtime}" in
   build)
     guard
+    modules_guard
     smoke
     {
       echo "built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
       echo "nodejs: $NODE_V"
       echo "android-tools(adb): $ADB_V"
       echo "imagemagick: $IM_V (bin: $IM)"
+      echo "modules: ok ($TOOL_COUNT tools registered)"
       echo "screenshot-pipeline(file->file): ok"
       echo "imagemagick-stream(stdin=file): $STREAM"
       echo "imagemagick-stream(stdin=pipe): $PIPED"

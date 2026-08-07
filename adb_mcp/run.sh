@@ -9,12 +9,20 @@ export LOG_REQUESTS="${LOG_REQUESTS}"
 ALLOW_SHELL=$(bashio::config 'allow_shell' 2>/dev/null || echo "true")
 export ALLOW_SHELL="${ALLOW_SHELL}"
 
+# 1.1.0: удаление пакетов (adb_app mode=uninstall) выключено по умолчанию.
+# Отключение (disable-user) обратимо и живёт под общими правилами adb_app;
+# удаление — нет, и для сайдлоуд-приложений откат возможен только из бэкапа
+# APK. Опция здесь ровно затем, чтобы включение было осознанным действием
+# в настройках аддона, а не параметром одного вызова.
+ALLOW_UNINSTALL=$(bashio::config 'allow_uninstall' 2>/dev/null || echo "false")
+export ALLOW_UNINSTALL="${ALLOW_UNINSTALL}"
+
 # Версии внешних утилит в логе с первой секунды: 21.07.2026 три релиза подряд
 # были сломаны поведением тулчейна, а не кода, и диагностика шла вслепую.
 bashio::log.info "Toolchain: $(/toolchain-check.sh runtime)"
-# Манифест сборки (версии + результат смоука конвейера скриншота, включая
-# статус стрим-режима IM). Файл лежит в образе, но шелла в контейнер нет —
-# без этой строки прочитать его снаружи нечем.
+# Манифест сборки (версии, число зарегистрированных тулов и результат смоука
+# конвейера скриншота, включая статус стрим-режима IM). Файл лежит в образе,
+# но шелла в контейнер нет — без этой строки прочитать его снаружи нечем.
 if [ -f /toolchain.txt ]; then
     bashio::log.info "Build manifest: $(tr '\n' ';' < /toolchain.txt | sed 's/;/; /g')"
 fi
@@ -46,7 +54,7 @@ done
 
 adb devices -l
 
-bashio::log.info "Starting ADB MCP Server on port 3199 (allow_shell: ${ALLOW_SHELL})"
+bashio::log.info "Starting ADB MCP Server on port 3199 (allow_shell: ${ALLOW_SHELL}, allow_uninstall: ${ALLOW_UNINSTALL})"
 node /server.js 3199 &
 
 sleep 2

@@ -56,10 +56,26 @@ RUN apk add --no-cache \
       "${IMAGEMAGICK_PKG}" \
       imagemagick-jpeg
 
+# ---------------------------------------------------------------------------
+# Исходники.
+# ⚠ С 1.1.0 сервер разложен на модули, и файлы копируются ПОШТУЧНО. Забытая
+# строка COPY даёт образ, который собирается чисто и падает на require() уже
+# в бою. Поэтому список модулей продублирован в toolchain-check.sh, который
+# на сборке проверяет наличие каждого файла, его синтаксис и то, что
+# registry.js реально импортируется. Добавляешь модуль — добавь его в ОБА
+# места.
+# ---------------------------------------------------------------------------
 COPY run.sh /run.sh
 COPY toolchain-check.sh /toolchain-check.sh
 COPY proxy.js /proxy.js
 COPY server.js /server.js
+COPY registry.js /registry.js
+COPY adb.js /adb.js
+COPY device.js /device.js
+COPY session.js /session.js
+COPY ui.js /ui.js
+COPY files.js /files.js
+COPY apps.js /apps.js
 RUN chmod a+x /run.sh /toolchain-check.sh \
     && /toolchain-check.sh build
 
