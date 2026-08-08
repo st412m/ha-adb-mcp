@@ -231,11 +231,15 @@ async function actInfo(serial, args) {
 async function actLaunch(serial, args) {
   const pkg = coerceArray(args.packages || args.package)[0];
   if (!pkg) throw new Error('action=launch требует packages');
-  // monkey запускает главную активность, не требуя знать её имя — но ТОЛЬКО
-  // если у пакета объявлена категория LAUNCHER. У X-plore в MAIN-активности
-  // лишь DEFAULT/BROWSABLE: monkey выходит с rc=251, ничего не инжектит и
-  // печатает безобидную строку про SYS_KEYS. До 1.2.1 это шло как «Launched».
-  // Признак настоящего запуска один — «Events injected».
+  // monkey запускает главную активность, не требуя знать её имя. Но он умеет
+  // отказать молча: выйти с rc=251, ничего не инжектить и напечатать
+  // безобидную строку про SYS_KEYS — до 1.2.1 это шло как «Launched».
+  // Наблюдалось на Fire OS 7 в первые минуты после install-multiple, когда
+  // PackageManager ещё не перестроил список запускаемых активностей:
+  // resolve-activity уже отвечал, monkey ещё нет. На Samsung SDK 33 тот же
+  // сценарий сразу после установки проходит штатно, так что это особенность
+  // прошивки, а не общее правило. Признак настоящего запуска один —
+  // «Events injected»; причина отказа значения не имеет.
   const out = await adbSh(serial,
     `monkey -p ${sq(pkg)} -c android.intent.category.LAUNCHER 1 2>&1 | tail -n 3`);
   if (/Events injected:\s*[1-9]/.test(out))

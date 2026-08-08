@@ -172,8 +172,8 @@ async function key(args) {
  * что это свойство leanback-устройств вообще: `android.hardware.touchscreen`
  * НЕТ НИ НА ОДНОМ из трёх (Fire TV, Shield, TiVo) — везде только
  * `leanback_only`, а у Fire TV вдобавок `faketouch`. Поэтому признак берётся
- * из `pm list features`, а не из списка моделей: на чужом устройстве,
- * которого у нас нет, он сработает так же.
+ * из `pm list features`, а не из списка моделей: на Samsung SDK 33 тот же код
+ * без изменений уходит в ветку тапа.
  */
 async function deviceCaps(serial) {
   const out = (await adb(withSerial(serial, ['shell', 'pm list features']))).toString();
@@ -273,11 +273,39 @@ async function findAndTap(args) {
   let hits = nodes.filter(n => nodeMatches(n, args));
 
   if (!hits.length) {
-    const visible = nodes.filter(n => nodeLabel(n, nodes))
-      .map(n => `  ${nodeLabel(n, nodes)}${n.resourceId ? ` [id=${n.resourceId.split('/').pop()}]` : ''}`)
-      .slice(0, 40).join('\n');
-    throw new Error(`Элемент не найден. Видны сейчас:\n${visible || '  (ничего с текстом)'}`);
+    // 1.2.2: подписи теперь подтягиваются из потомков, поэтому контейнер и
+    // его подпись давали ДВЕ одинаковые строки («Назад», «Назад»), а на
+    // трёхуровневой вёрстке и три. Для читаемости списка дубли схлопываем —
+    // на поиск это не влияет, список только показывается.
+    const seen = new Set();
+    const visible = [];
+    for (const n of nodes) {
+      const label = nodeLabel(n, nodes);
+      if (!label) continue;
+      const tail = n.resourceId ? n.resourceId.split('/').pop() : '';
+      const k = `${label}|${tail}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      visible.push(`  ${label}${tail ? ` [id=${tail}]` : ''}`);
+      if (visible.length >= 40) break;
+    }
+    throw new Error(`Элемент не найден. Видны сейчас:\n${visible.join('\n') || '  (ничего с текстом)'}`);
   }
+
+  // 1.2.2: то же самое, но уже по существу. Контейнер и лежащая внутри него
+  // подпись — ОДИН элемент с точки зрения пользователя, а под критерий
+  // попадали оба, и тул требовал index там, где выбирать не из чего.
+  // Оставляем внешний кликабельный узел: именно к нему обход и поднимался бы.
+  if (hits.length > 1) {
+    hits = hits.filter(n => !hits.some(o =>
+      o !== n && o.box && n.box &&
+      nodeLabel(o, nodes) === nodeLabel(n, nodes) &&
+      o.box[0] <= n.box[0] && o.box[1] <= n.box[1] &&
+      o.box[2] >= n.box[2] && o.box[3] >= n.box[3] &&
+      (o.clickable || !n.clickable) &&
+      (o.box[2] - o.box[0]) * (o.box[3] - o.box[1]) > (n.box[2] - n.box[0]) * (n.box[3] - n.box[1])));
+  }
+
   if (hits.length > 1 && args.index === undefined) {
     const list = hits.map((n, i) => `  [${i}] ${nodeLabel(n, nodes)} @(${n.x},${n.y})`).join('\n');
     throw new Error(`Под критерий попало ${hits.length} элементов — уточни запрос или задай index:\n${list}`);

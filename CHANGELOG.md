@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.2
+Follow-up to the 1.2.1 acceptance run, which added a fourth device to the fleet — a Samsung S20 FE (SDK 33, arm64-v8a, 480 dpi, and a real touchscreen). Two cosmetic consequences of the 1.2.1 label handling, and one correction to the record.
+
+**Duplicate labels are collapsed.** Since labels are now recovered from a node's children, a container and the label inside it produced two identical lines in the "visible now" list — three on deeper layouts. `Back, Back, X-plore, Donate, Donate` is noise, not information. Identical label plus resource-id is now listed once.
+
+**A container and its own label no longer count as two matches.** The same pairing also inflated the match count, so the tool asked for an `index` to choose between an element and its own caption — a choice with no meaning. When one match geometrically contains another and both resolve to the same label, the outer clickable node is kept: that is the one the DPAD walk would have aimed at anyway. Genuinely separate elements that happen to share a label are untouched and still require an `index`.
+
+### Correction to the 1.2.1 notes
+The 1.2.1 entry explained the `adb_app action=launch` defect by claiming X-plore does not declare the LAUNCHER category. That explanation was wrong: `pm dump` shows `MAIN` plus `android.intent.category.LAUNCHER` on its main activity, and `monkey` launches it normally. What was actually observed was a transient PackageManager state on Fire OS 7 in the first minutes after `install-multiple` — `cmd package resolve-activity` already answered while `monkey` did not yet. The same sequence on a Samsung running SDK 33 launches immediately, so this is firmware behaviour rather than a general rule.
+
+The fix itself is unaffected and stands: a launch is confirmed by `Events injected` rather than assumed, whatever the reason `monkey` declines. Note that the `resolve-activity` fallback has still not executed on real hardware — the failure no longer reproduces.
+
 ## 1.2.1
 Fixes found by the 1.2.0 acceptance run on three live devices (Fire TV SDK 28, Shield SDK 30, TiVo SDK 31). The `.apks` feature passed that run unchanged; everything below is `adb_find_and_tap`, plus one older `adb_app` defect the same session exposed.
 
