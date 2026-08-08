@@ -163,7 +163,171 @@ async function key(args) {
   return text(`Sent keyevent ${k}`);
 }
 
+/**
+ * Способности ввода — ВЫВОДЯТСЯ с устройства, не угадываются по модели.
+ *
+ * В вики было записано, что «на Fire TV тап кликает по сфокусированному
+ * элементу» — как особенность конкретной приставки. Проверка 08.08 показала,
+ * что это свойство leanback-устройств вообще: `android.hardware.touchscreen`
+ * НЕТ НИ НА ОДНОМ из трёх (Fire TV, Shield, TiVo) — везде только
+ * `leanback_only`, а у Fire TV вдобавок `faketouch`. Поэтому признак берётся
+ * из `pm list features`, а не из списка моделей: на чужом устройстве,
+ * которого у нас нет, он сработает так же.
+ */
+async function deviceCaps(serial) {
+  const out = (await adb(withSerial(serial, ['shell', 'pm list features']))).toString();
+  const has = f => out.includes(`feature:${f}`);
+  return {
+    touchscreen: has('android.hardware.touchscreen'),
+    faketouch: has('android.hardware.faketouch'),
+    leanback: has('android.software.leanback') || has('android.software.leanback_only'),
+  };
+}
+
+const norm = s => String(s || '').trim().toLowerCase();
+
+/** Совпадение узла с запрошенными критериями. */
+function nodeMatches(n, args) {
+  const exact = args.exact === true || args.exact === 'true';
+  const cmp = (hay, needle) => {
+    const h = norm(hay), x = norm(needle);
+    if (!x) return false;
+    return exact ? h === x : h.includes(x);
+  };
+  if (args.resource_id) {
+    // сравниваем и полный id, и хвост после '/'
+    const rid = norm(n.resourceId), tail = norm(String(n.resourceId).split('/').pop());
+    const want = norm(args.resource_id);
+    if (!(exact ? (rid === want || tail === want) : (rid.includes(want) || tail.includes(want)))) return false;
+  }
+  if (args.text && !cmp(n.text, args.text)) return false;
+  if (args.desc && !cmp(n.desc, args.desc)) return false;
+  return !!(args.resource_id || args.text || args.desc);
+}
+
+/** Устойчивое тождество узла: bounds смещаются при скролле, текст нет. */
+const nodeKey = n => `${n.resourceId}|${n.text}|${n.desc}`;
+
+async function currentWindow(serial) {
+  try {
+    const o = (await adb(withSerial(serial, ['shell', 'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus']))).toString();
+    return o.trim();
+  } catch { return ''; }
+}
+
+/**
+ * Найти элемент по тексту / resource-id / content-desc и активировать его.
+ *
+ * Два режима, и выбор между ними выводится, а не задаётся:
+ *  • есть touchscreen → обычный `input tap` по центру элемента;
+ *  • leanback без touchscreen → обход DPAD'ом до фокуса на элементе,
+ *    потом DPAD_CENTER. Тап по координатам там кликает по ТЕКУЩЕМУ
+ *    фокусу, т.е. молча попадает не туда — худший вид отказа.
+ *
+ * Никакой шаг не считается успешным без проверки: после каждого
+ * нажатия дамп снимается заново и сверяется, сдвинулся ли фокус. Если
+ * фокус встал — честный отказ с отчётом, а не видимость успеха.
+ */
+async function findAndTap(args) {
+  const serial = args.serial;
+  if (!args.text && !args.resource_id && !args.desc)
+    throw new Error('укажи хотя бы один критерий: text, resource_id или desc');
+
+  const caps = await deviceCaps(serial);
+  let nodes = parseUiNodes(await uiXmlFresh(serial));
+  let hits = nodes.filter(n => nodeMatches(n, args));
+
+  if (!hits.length) {
+    const visible = nodes.filter(n => n.text || n.desc)
+      .map(n => `  ${n.text || n.desc}${n.resourceId ? ` [id=${n.resourceId.split('/').pop()}]` : ''}`)
+      .slice(0, 40).join('\n');
+    throw new Error(`Элемент не найден. Видны сейчас:\n${visible || '  (ничего с текстом)'}`);
+  }
+  if (hits.length > 1 && args.index === undefined) {
+    const list = hits.map((n, i) => `  [${i}] ${n.text || n.desc} @(${n.x},${n.y})`).join('\n');
+    throw new Error(`Под критерий попало ${hits.length} элементов — уточни запрос или задай index:\n${list}`);
+  }
+  let target = hits[Math.min(Number(args.index) || 0, hits.length - 1)];
+  const targetKey = nodeKey(target);
+  const winBefore = await currentWindow(serial);
+
+  // ── Путь с настоящим тачскрином ──
+  if (caps.touchscreen) {
+    await adb(withSerial(serial, ['shell', `input tap ${target.x} ${target.y}`]));
+    const winAfter = await currentWindow(serial);
+    return text(
+      `Тап по «${target.text || target.desc}» @(${target.x},${target.y}) — у устройства есть touchscreen.\n` +
+      `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (это нормально для внутриэкранных действий)'}`);
+  }
+
+  // ── leanback: обход DPAD'ом ──
+  if (!caps.leanback)
+    throw new Error('У устройства нет ни touchscreen, ни leanback — как активировать элемент, неизвестно. Отказ вместо слепого тапа.');
+
+  const maxSteps = Math.min(Math.max(Number(args.max_steps) || 20, 1), 40);
+  const trail = [];
+  let stuck = 0;
+
+  for (let step = 0; step < maxSteps; step++) {
+    const cur = nodes.find(n => n.focused);
+    if (!cur) {
+      throw new Error(
+        `Фокус на экране не найден — вести DPAD'ом не от чего. ` +
+        `Нажми любую клавишу (adb_key DPAD_DOWN) и повтори.${trail.length ? ` Пройдено: ${trail.join(' ')}` : ''}`);
+    }
+    if (nodeKey(cur) === targetKey) break;
+
+    const dx = target.x - cur.x, dy = target.y - cur.y;
+    const primary = Math.abs(dx) > Math.abs(dy)
+      ? (dx > 0 ? 'DPAD_RIGHT' : 'DPAD_LEFT')
+      : (dy > 0 ? 'DPAD_DOWN' : 'DPAD_UP');
+    const secondary = Math.abs(dx) > Math.abs(dy)
+      ? (dy > 0 ? 'DPAD_DOWN' : 'DPAD_UP')
+      : (dx > 0 ? 'DPAD_RIGHT' : 'DPAD_LEFT');
+    const dir = stuck === 0 ? primary : secondary;
+
+    await adb(withSerial(serial, ['shell', `input keyevent ${dir}`]));
+    trail.push(dir.replace('DPAD_', ''));
+    await new Promise(r => setTimeout(r, 350));
+
+    const prevKey = nodeKey(cur);
+    nodes = parseUiNodes(await uiXmlFresh(serial));
+    const now = nodes.find(n => n.focused);
+    // цель могла сместиться при скролле — переищем её по тексту
+    const again = nodes.find(n => nodeKey(n) === targetKey);
+    if (again) target = again;
+
+    if (now && nodeKey(now) === prevKey) {
+      stuck++;
+      if (stuck >= 2)
+        throw new Error(
+          `Фокус не двигается ни по одной оси, остался на «${now.text || now.desc}». ` +
+          `Цель «${target.text || target.desc}» не достигнута за ${step + 1} шагов (${trail.join(' ')}). ` +
+          `Ничего не нажато — веди вручную через adb_key.`);
+    } else {
+      stuck = 0;
+    }
+  }
+
+  const finalFocus = nodes.find(n => n.focused);
+  if (!finalFocus || nodeKey(finalFocus) !== targetKey)
+    throw new Error(
+      `За ${maxSteps} шагов фокус до цели не дошёл (${trail.join(' ')}). ` +
+      `Сейчас в фокусе: «${finalFocus ? (finalFocus.text || finalFocus.desc) : 'ничего'}». ` +
+      `НИЧЕГО НЕ НАЖАТО. Увеличь max_steps или веди вручную.`);
+
+  await adb(withSerial(serial, ['shell', 'input keyevent DPAD_CENTER']));
+  await new Promise(r => setTimeout(r, 400));
+  const winAfter = await currentWindow(serial);
+
+  return text(
+    `Активировано «${target.text || target.desc}» через DPAD (устройство leanback, touchscreen нет).\n` +
+    `Путь: ${trail.length ? trail.join(' → ') : 'уже было в фокусе'} → CENTER\n` +
+    `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (нормально для внутриэкранных действий)'}`);
+}
+
 module.exports = {
-  screenshot, uiDump, tap, swipe, typeText, key,
+  screenshot, uiDump, tap, swipe, typeText, key, findAndTap,
   parseUiNodes, formatUiNodes, uiXmlFresh, screenshotPipeline,
+  deviceCaps, nodeMatches, nodeKey,
 };

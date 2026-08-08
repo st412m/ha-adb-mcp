@@ -71,9 +71,34 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { key: { type: 'string' }, serial: { type: 'string' } }, required: ['key'] }
   },
   {
+    name: 'adb_find_and_tap',
+    description:
+      'Find an on-screen element by text, resource-id or content-desc and activate it in one call — no need to read a UI dump and pick coordinates yourself.\n' +
+      'How it activates the element is DERIVED from the device, not assumed: if the device reports android.hardware.touchscreen it taps the element centre; if it is a leanback (TV) device without a touchscreen, a coordinate tap would hit whatever currently HAS FOCUS instead — a silent miss — so the element is reached by walking the focus there with DPAD keys and then pressing DPAD_CENTER.\n' +
+      'Every step is verified: the UI is re-dumped after each key and the focus is checked. If the focus stops moving, or the target is not reached within max_steps, the tool reports exactly where it got stuck and presses NOTHING rather than guessing.',
+    inputSchema: { type: 'object', properties: {
+      text: { type: 'string', description: 'Visible label to match (substring by default, case-insensitive)' },
+      resource_id: { type: 'string', description: 'resource-id; the part after "/" is enough' },
+      desc: { type: 'string', description: 'content-desc to match' },
+      exact: { type: 'boolean', description: 'Require an exact match instead of substring. Default false.' },
+      index: { type: 'number', description: 'Which match to use when several elements match. Without it, several matches are an error listing the candidates.' },
+      max_steps: { type: 'number', description: 'Max DPAD steps on leanback devices, default 20, max 40' },
+      serial: { type: 'string' }
+    } }
+  },
+  {
     name: 'adb_install',
-    description: 'Install an APK from HA filesystem (/media or /share). apk_path accepts a single path, OR an array of split-APK paths (base.apk + config.*.apk) which are installed atomically via install-multiple. Flags -r (reinstall), -t (allow testOnly/debug builds) and -g (grant all permissions) applied by default.',
-    inputSchema: { type: 'object', properties: { apk_path: { type: ['string', 'array'], items: { type: 'string' }, description: 'Single APK path, or array of split-APK paths for install-multiple (e.g. base + config.arm64_v8a + config.xxhdpi + config.<lang>). Restore-after-reset: `pm path <pkg>` lists the full installed set -> adb_pull each -> pass them here as an array.' }, serial: { type: 'string' } }, required: ['apk_path'] }
+    description: 'Install an APK from HA filesystem (/media or /share). apk_path accepts a single .apk, an array of split-APK paths installed atomically via install-multiple, OR a single .apks/.xapk/.apkm bundle.\n' +
+      'For a bundle the splits are chosen from the ACTUAL device properties (ABI list, screen density, locale) and installed with install-multiple; the bundle is unpacked add-on side, so it works on devices with no unzip (Fire OS 7). A wrong ABI leaves a non-working app, so no matching ABI split is a refusal; a density mismatch is not fatal (resources fall back to the base APK) and the nearest bucket is used with a note. Use dry_run=true to see the selection first.\n' +
+      'Flags -r (reinstall), -t (allow testOnly/debug builds) and -g (grant all permissions) applied by default.',
+    inputSchema: { type: 'object', properties: {
+      apk_path: { type: ['string', 'array'], items: { type: 'string' }, description: 'Single APK path, array of split-APK paths, or one .apks/.xapk/.apkm bundle. Restore-after-reset: `pm path <pkg>` lists the full installed set -> adb_pull each -> pass them here as an array.' },
+      abi: { type: 'string', description: 'Bundle only: force an ABI instead of the device default (e.g. armeabi-v7a)' },
+      density: { type: 'number', description: 'Bundle only: force a screen density in dpi instead of the device value' },
+      locales: { type: ['string', 'array'], items: { type: 'string' }, description: 'Bundle only: extra language splits to include alongside the device language (e.g. ["ru"] on an en-US device)' },
+      dry_run: { type: 'boolean', description: 'Bundle only: report the chosen splits and install nothing' },
+      serial: { type: 'string' }
+    }, required: ['apk_path'] }
   },
   {
     name: 'adb_uninstall',
@@ -142,6 +167,7 @@ async function callTool(name, args) {
     case 'adb_swipe':      return ui.swipe(args);
     case 'adb_text':       return ui.typeText(args);
     case 'adb_key':        return ui.key(args);
+    case 'adb_find_and_tap': return ui.findAndTap(args);
 
     case 'adb_install':    return files.install(args);
     case 'adb_uninstall':  return files.uninstall(args);

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0
+Two features that were blocked until the 1.1.1 property fixes landed — split selection reads the device locale and density, and both were wrong before.
+
+**`.apks` bundle install.** `adb_install` now accepts a single `.apks` / `.xapk` / `.apkm` bundle and picks the splits from the device's actual ABI list, screen density and locale. The prompt for this was the Fire TV rebuild after the July factory reset, where X-plore had to go in by hand through `pm install-create` / `install-write` / `install-commit` because `adb install` rejects a bundle and Fire OS 7 has no `unzip` to unpack one on the device. Unpacking happens add-on side instead, so the device needs nothing.
+
+- **The ZIP reader is written against `zlib`, not shelled out to `unzip`.** The container installs only nodejs, android-tools and imagemagick — there is no `unzip` in it. Alpine's busybox has an applet, but relying on that is a guess and adding a package for one operation is worse; a `.apks` is an ordinary ZIP and Node already ships `zlib`. No new dependency. Verified byte-for-byte against a reference implementation on deflate, stored, and archives with a trailing comment.
+- **Three naming conventions are supported, not one.** bundletool writes `splits/base-master.apk` and `base-arm64_v8a.apk`; APKMirror-style bundles use `<package>.apk` plus `config.arm64_v8a.apk`; pulling an installed app off a device gives `base.apk` plus `split_config.arm64_v8a.apk`. Supporting only the convention the code was written against would mean it works on exactly the bundles used to test it.
+- **A wrong ABI is refused; a wrong density is not.** An ABI mismatch leaves an app that will not start, so a bundle with no split for any of the device's ABIs is an error and nothing is installed. Density splits fail softly — resources fall back to the base APK — which is not a guess: on the Fire TV, X-plore is running right now with a `tvdpi` split on an `xhdpi` device. The nearest bucket is used and the mismatch is reported.
+- Language splits follow the device locale, with a `locales` argument to add more (useful when the system language and the user's language differ). `dry_run` reports the selection without installing.
+
+**`adb_find_and_tap`.** Finds an element by text, resource-id or content-desc and activates it in one call.
+
+The interesting part is how it activates. A coordinate tap on a TV box does not land where the coordinates point — it activates whatever currently holds focus, so the tap silently does the wrong thing. That behaviour was recorded as a Fire TV quirk; checking `pm list features` on all three boxes showed it is not device-specific at all: **none of them reports `android.hardware.touchscreen`**, they are all `leanback_only`. So the mode is derived from the feature list rather than from a model name: with a touchscreen, tap the element centre; without one, walk the focus to the element with DPAD keys and press DPAD_CENTER.
+
+Nothing is assumed to have worked. The UI is re-dumped after every key press and the focus is re-checked; the target is re-located each step because scrolling moves it. If the focus stops responding on both axes, or the target is not reached within `max_steps`, the tool says exactly where it stopped and presses **nothing** — a silent miss on someone's television is a worse outcome than a clear refusal.
+
 ## 1.1.2
 Two new **derived** signals for the protected set, replacing what would otherwise have been a hardcoded package name.
 
