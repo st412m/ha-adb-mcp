@@ -301,6 +301,149 @@ async function roleHolders(serial, sdk) {
 }
 
 /**
+ * Разобрать шестнадцатеричный адрес из /proc/net/tcp в читаемый вид.
+ * Слова там в little-endian, поэтому байты каждого 32-битного слова
+ * идут задом наперёд. IPv4-mapped адреса (::ffff:a.b.c.d) сворачиваются
+ * в IPv4 — именно в таком виде лежат локальные LAN-соединения в tcp6.
+ */
+function decodeAddr(hex) {
+  const h = String(hex || '').toUpperCase();
+  if (h.length === 8) {
+    return (h.match(/../g) || []).reverse().map(b => parseInt(b, 16)).join('.');
+  }
+  if (h.length === 32) {
+    const words = h.match(/.{8}/g);
+    if (words[0] === '00000000' && words[1] === '00000000' && words[2] === 'FFFF0000')
+      return decodeAddr(words[3]);
+    const bytes = words.flatMap(w => (w.match(/../g) || []).reverse());
+    const parts = [];
+    for (let i = 0; i < 16; i += 2) parts.push((bytes[i] + bytes[i + 1]).toLowerCase());
+    return parts.join(':').replace(/(^|:)0+([0-9a-f])/g, '$1$2');
+  }
+  return h;
+}
+
+function isLoopback(addr) {
+  return /^127\./.test(addr) || addr === '::1' || addr === '0:0:0:0:0:0:0:1';
+}
+
+/**
+ * Пакеты, держащие СЛУШАЮЩИЕ TCP-сокеты.
+ *
+ * Зачем это вообще есть. Латентный отказ — это отказ, видный только
+ * СНАРУЖИ устройства, а канарейка смотрит только внутрь: аккаунты на
+ * месте, лаунчер резолвится, а служба, которой пользовался Home
+ * Assistant, мёртва. Слушающий сокет — это прямое доказательство, что пакет
+ * обслуживает кого-то вне себя, и оно не требует знать ни вендора, ни
+ * имён пакетов — в отличие от списка в коде, который верен ровно для
+ * тех устройств, на которых его составили.
+ *
+ * ⚠ Различение, без которого признак бесполезен: ESTABLISHED с высоким
+ * локальным портом — это ИСХОДЯЩЕЕ соединение приложения и ничего не
+ * значит (любой VPN-клиент или видеоплеер даёт их десятками). Значим
+ * только LISTEN, а усилением считается входящее на слушающий порт с
+ * НЕ-loopback адреса: вот тогда клиент точно вне устройства.
+ */
+async function netListeners(serial) {
+  let out = '';
+  try {
+    out = await adbSh(serial, markedCommand({
+      uidmap: 'pm list packages -U',
+      tcp: 'cat /proc/net/tcp /proc/net/tcp6',
+    }));
+  } catch (e) {
+    return { byPackage: {}, note: `⚠ слушающие сокеты не опрошены (${e.message}) — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
+  }
+
+  const m = splitMarked(out);
+  if (!String(m.tcp || '').trim())
+    return { byPackage: {}, note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ';
+
+  const byUid = {};
+  for (const line of String(m.uidmap || '').split('\n')) {
+    const mm = /^package:(\S+)\s+uid:(\d+)/.exec(line.trim());
+    if (mm) (byUid[mm[2]] = byUid[mm[2]] || []).push(mm[1]);
+  }
+
+  const listening = {};   // uid -> Set(port)
+  const established = []; // {uid, lport, peer}
+  for (const line of String(m.tcp || '').split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 8 || !/^\d+:$/.test(f[0])) continue;
+    const [lAddr, lPortHex] = f[1].split(':');
+    const [rAddr, rPortHex] = f[2].split(':');
+    const state = f[3];
+    const uid = f[7];
+    const lport = parseInt(lPortHex, 16);
+    if (state === '0A') {
+      (listening[uid] = listening[uid] || new Set()).add(lport);
+    } else if (state === '01') {
+      established.push({ uid, lport, peer: decodeAddr(rAddr), rport: parseInt(rPortHex, 16) });
+    }
+    void lAddr;
+  }
+
+  const byPackage = {};
+  for (const [uid, ports] of Object.entries(listening)) {
+    for (const pkg of (byUid[uid] || [])) {
+      const entry = byPackage[pkg] || { ports: [], serving: [] };
+      entry.ports = Array.from(new Set([...entry.ports, ...ports])).sort((a, b) => a - b);
+      for (const e of established) {
+        if (e.uid !== uid || !ports.has(e.lport)) continue;
+        if (isLoopback(e.peer)) continue;   // клиент на том же устройстве — не внешняя зависимость
+        const tag = `${e.peer} → :${e.lport}`;
+        if (!entry.serving.includes(tag)) entry.serving.push(tag);
+      }
+      byPackage[pkg] = entry;
+    }
+  }
+
+  return { byPackage, note: null };
+}
+
+/**
+ * Пакеты, РЕГИСТРИРУЮЩИЕ аутентификатор аккаунта.
+ *
+ * `dumpsys account` отдаёт строки вида
+ *   AuthenticatorDescription {type=com.amazon.account},
+ *   ComponentInfo{com.amazon.imp/com.amazon.dcp.sso.AccountAuthenticationService}
+ * то есть КАКОЙ именно пакет обслуживает каждый тип аккаунта.
+ *
+ * Это вывод взамен угадывания по имени. Разведка 07.08 показала, насколько
+ * это важно: на Fire TV аутентификатор типа `com.amazon.account` живёт в
+ * пакете `com.amazon.imp`, который НЕ ловится ни одной из регулярок
+ * ACCOUNT_HINTS (в имени нет ни dcp, ни sso, ни account, ни auth) — и именно
+ * он был в числе 22 отключённых 21.07, в корзине «телеметрия/реклама».
+ * Считать его доказанной причиной инцидента нельзя (устройство сброшено,
+ * а проверка отключением = повторение инцидента), но то, что список
+ * шаблонов его не видит, а вывод видит — достаточное основание.
+ */
+async function authProviders(serial) {
+  let out = '';
+  try {
+    out = await adbSh(serial, 'dumpsys account 2>/dev/null | grep AuthenticatorDescription');
+  } catch (e) {
+    return { byPackage: {}, note: `⚠ поставщики аутентификаторов не опрошены (${e.message}) — ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
+  }
+
+  const byPackage = {};
+  const re = /AuthenticatorDescription\s*\{\s*type=([^}]*)\}[\s\S]{0,40}?ComponentInfo\{([^/}]+)\//g;
+  let mm;
+  while ((mm = re.exec(out)) !== null) {
+    const type = mm[1].trim();
+    const pkg = mm[2].trim();
+    if (!looksLikePackage(pkg)) continue;
+    const list = byPackage[pkg] = byPackage[pkg] || [];
+    if (type && !list.includes(type)) list.push(type);
+  }
+
+  if (!Object.keys(byPackage).length)
+    return { byPackage: {}, note: '⚠ в dumpsys account не найдено ни одного аутентификатора — ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
+
+  return { byPackage, note: null };
+}
+
+/**
  * Вывести protected-набор с устройства.
  * Каждый источник опрашивается отдельно, не роняет остальные И ОБЯЗАН
  * оставить след в notes, если не сработал.
@@ -372,8 +515,42 @@ async function protectedSet(serial, opts = {}) {
   }
   if (roles.note) notes.push(roles.note);
 
-  // Стек аккаунта/регистрации — эвристика по именам, помечена как эвристика
   const pkgs = opts.packages || await listPackages(serial);
+
+  // Сетевые слушатели и поставщики аутентификаторов — два выводимых
+  // признака вместо списка имён в коде.
+  //
+  // Граница проведена по ОБРАТИМОСТИ, а не по важности:
+  //  • системный пакет → в защиту (вернуть трудно, заметить потерю трудно);
+  //  • пользовательский → предупреждение, но НЕ отказ: его APK аддон
+  //    умеет бэкапить и ставить обратно.
+  // Без этой границы сетевой признак сделал бы неотключаемыми любой
+  // торрент-сервер или VPN-клиент, а аутентификаторный — файловые
+  // менеджеры вроде X-plore, которые тоже регистрируют аутентификатор.
+  const advisories = [];
+  const net = await netListeners(serial);
+  if (net.note) notes.push(net.note);
+  const auth = await authProviders(serial);
+  if (auth.note) notes.push(auth.note);
+
+  const netSystem = {}, authSystem = {};
+  for (const [pkg, info] of Object.entries(net.byPackage)) {
+    const where = `слушает порт${info.ports.length > 1 ? 'ы' : ''} ${info.ports.join(', ')}` +
+      (info.serving.length ? `; СЕЙЧАС обслуживает ${info.serving.join(', ')}` : '');
+    if (pkgs.system.has(pkg)) netSystem[pkg] = info;
+    else advisories.push({ package: pkg, signal: 'net_listener', system: false, detail: `${where} — что-то вне устройства может от него зависеть` });
+  }
+  for (const [pkg, types] of Object.entries(auth.byPackage)) {
+    const where = `обслуживает аутентификатор аккаунта: ${types.join(', ')}`;
+    if (pkgs.system.has(pkg)) authSystem[pkg] = types;
+    else advisories.push({ package: pkg, signal: 'authenticator', system: false, detail: `${where} — отключение может унести связанные аккаунты` });
+  }
+  if (Object.keys(netSystem).length) sources.net_listener = netSystem;
+  if (Object.keys(authSystem).length) sources.authenticator = authSystem;
+
+  // Стек аккаунта по именам — ТЕПЕРЬ ДОПОЛНИТЕЛЬНЫЙ источник, а не
+  // основной: он ловит библиотеки вроде dcp.contracts.*, которые сами
+  // аутентификаторов не регистрируют и потому не видны выводу выше.
   const accountLike = pkgs.all.filter(p => ACCOUNT_HINTS.some(re => re.test(p)));
   if (accountLike.length) sources.account_like = accountLike;
 
@@ -385,15 +562,20 @@ async function protectedSet(serial, opts = {}) {
     if (sources[key]) set.add(sources[key]);
   }
   for (const p of roles.holders) set.add(p);
+  for (const p of Object.keys(netSystem)) set.add(p);
+  for (const p of Object.keys(authSystem)) set.add(p);
   for (const p of accountLike) set.add(p);
 
   if (accountLike.length)
-    notes.push('account_like — эвристика по именам пакетов, проверяй глазами в dry_run');
+    notes.push('account_like — эвристика по именам пакетов (дополнительный источник), проверяй глазами в dry_run');
+  if (advisories.length)
+    notes.push(`${advisories.length} пользовательских пакетов с признаками внешней связности — не защищены (обратимы через бэкап APK), см. advisories`);
   for (const n of (props.notes || [])) notes.push(n);
 
   return {
     packages: Array.from(set).sort(),
     sources,
+    advisories,
     notes,
   };
 }
@@ -401,5 +583,6 @@ async function protectedSet(serial, opts = {}) {
 module.exports = {
   CORE_PROTECTED, CORE_PREFIXES, ACCOUNT_HINTS, PKG_RE, LOCALE_RE,
   getProps, listPackages, accountSnapshot, protectedSet, roleHolders,
+  netListeners, authProviders, decodeAddr, isLoopback,
   pkgOf, looksLikePackage, splitMarked, markedCommand,
 };

@@ -295,11 +295,19 @@ async function actRemove(serial, args) {
       `Ничего не выполнено (целиком, а не частично). ` +
       `Если уверен — убери их из списка вручную, обхода в инструменте нет.`);
 
+  // Предупреждения по ПОЛЬЗОВАТЕЛЬСКИМ пакетам с признаками внешней
+  // связности (слушающий сокет / аутентификатор аккаунта). Это НЕ
+  // отказ — такой пакет обратим через бэкап APK. Но молчать о нём
+  // тоже нельзя: весь смысл признака в том, что последствие видно
+  // только снаружи устройства, а значит и канарейка его не поймает.
+  const advisories = (prot.advisories || []).filter(a => packages.includes(a.package));
+
   const plan = packages.map(p => ({
     package: p,
     system: pkgs.system.has(p),
     already_disabled: pkgs.disabled.has(p),
     action: mode,
+    warnings: advisories.filter(a => a.package === p).map(a => `${a.signal}: ${a.detail}`),
     backup: doBackup && !pkgs.system.has(p) ? 'да (пользовательский пакет)'
       : doBackup ? 'да (системный — APK сохраняется, но ставится обратно через install-existing)' : 'нет',
     rollback: mode === 'disable' ? 'pm enable'
@@ -319,8 +327,11 @@ async function actRemove(serial, args) {
       protected_count: prot.packages.length,
       protected_sources: prot.sources,
       protected_notes: prot.notes,
+      advisories,
       plan,
-      hint: 'Повтори с dry_run=false. Откат: adb_app action=restore.',
+      hint: advisories.length
+        ? 'ЕСТЬ ПРЕДУПРЕЖДЕНИЯ — прочти advisories перед тем как продолжать. Повтори с dry_run=false. Откат: adb_app action=restore.'
+        : 'Повтори с dry_run=false. Откат: adb_app action=restore.',
     });
   }
 
@@ -329,6 +340,7 @@ async function actRemove(serial, args) {
 
   const state = readState(args, serial);
   const report = { mode, applied: [], failed: [], stopped: false, canary: [] };
+  if (advisories.length) report.advisories = advisories;
 
   for (let i = 0; i < packages.length; i += batchSize) {
     const batch = packages.slice(i, i + batchSize);

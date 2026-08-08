@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.2
+Two new **derived** signals for the protected set, replacing what would otherwise have been a hardcoded package name.
+
+The prompt for this was a hole left over from 1.1.1: reading role holders from `dumpsys role` protects the Google TV remote service on Android 12, but the `SYSTEM_TELEVISION_REMOTE_SERVICE` role does not exist before SDK 31 — so on an Android 11 box the very same package sits unprotected. Adding that one package to the core list would have fixed exactly one device and left every other vendor's equivalent exposed. The generalisation comes from restating the problem: **a latent failure is a failure visible only from outside the device**, and the canary only ever looks inward. So the thing worth detecting is external coupling.
+
+- **`net_listener`** — packages holding a listening TCP socket, read from `/proc/net/tcp` and `/proc/net/tcp6` with uid mapped to package via `pm list packages -U`. A listening socket is direct evidence that a package serves something beyond itself, and it requires no knowledge of the vendor or of any package name. One distinction carries the whole signal: an ESTABLISHED row with a high local port is an *outbound* connection and means nothing — any VPN client or video player produces dozens. Only LISTEN counts, and an inbound connection to a listening port from a non-loopback peer escalates it to "currently serving an off-device client". Verified readable from the shell on SDK 28, 30 and 31; the Android 10+ restrictions on `/proc/net` do not apply to uid 2000.
+- **`authenticator`** — packages that actually register an account authenticator, parsed from the `AuthenticatorDescription {type=...}, ComponentInfo{package/...}` lines of `dumpsys account`. This is derivation in place of guessing: the previous account-stack detection matched package names against a list of regexes, which is the same hardcoding in a different shape. The name-based heuristic is kept, but demoted to a supplementary source — it still catches support libraries that register no authenticator of their own.
+
+**Protect or warn is decided by reversibility, not by importance.** A *system* package carrying either signal goes into the protected set: it is hard to restore and its loss is hard to notice. A *user* package carrying the same signal produces a warning in the plan instead of a refusal, because the add-on can back up and reinstall its APK. Without that line the socket signal would make every torrent server and VPN client undisableable, and the authenticator signal would do the same to file managers, which register authenticators too. Warnings appear in the `dry_run` plan per package, and in the report when a run proceeds.
+
+No GitHub release is cut for this version either; it is a staging build on the way to the next feature release.
+
 ## 1.1.1
 Acceptance of 1.1.0 on the three live devices (Fire TV / SDK 28, Shield / SDK 30, TiVo / SDK 31) found four defects. Two of them were in the protected set itself, and both failed **silently** — which is the part that matters. 1.1.0 had only ever been exercised against a stubbed `adb`, and a stub cannot tell you that a real command does not exist.
 
