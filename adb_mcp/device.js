@@ -357,7 +357,7 @@ async function netListeners(serial) {
 
   const m = splitMarked(out);
   if (!String(m.tcp || '').trim())
-    return { byPackage: {}, note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ';
+    return { byPackage: {}, note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
 
   const byUid = {};
   for (const line of String(m.uidmap || '').split('\n')) {
