@@ -27,7 +27,7 @@ Fixes found by the 1.2.0 acceptance run on three live devices (Fire TV SDK 28, S
 
 **Failure reports name the element.** When focus sat on a container with no text of its own, reports read `now focused: ""`, losing the one detail they exist to convey.
 
-**`adb_app action=launch` no longer claims success when nothing started.** `monkey -c android.intent.category.LAUNCHER` exits 251 and injects nothing for a package that does not declare the LAUNCHER category — X-plore declares only DEFAULT and BROWSABLE — and the harmless `SYS_KEYS` line it prints was being reported as a launch. Success is now determined by `Events injected`, with a fallback that resolves the main activity via `cmd package resolve-activity` and starts it explicitly, then confirms against the focused window.
+**`adb_app action=launch` no longer claims success when nothing started.** `monkey -c android.intent.category.LAUNCHER` can exit 251 and inject nothing while printing only a harmless SYS_KEYS line, which was being reported as a launch. (The cause originally described here was wrong; see the correction under 1.2.2.) Success is now determined by `Events injected`, with a fallback that resolves the main activity via `cmd package resolve-activity` and starts it explicitly, then confirms against the focused window.
 
 **An ABI refusal names the ABI that was actually asked for.** Forcing `abi=` produced a message listing the *device's* ABIs and then contradicting itself by showing one of them as present in the bundle.
 
