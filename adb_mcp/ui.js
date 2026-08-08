@@ -76,6 +76,7 @@ function parseUiNodes(xml) {
     if (!b) continue;
     nodes.push({
       text: txt, desc, resourceId: rid, clickable, focused, bounds,
+      box: [+b[1], +b[2], +b[3], +b[4]],
       x: Math.round((+b[1] + +b[3]) / 2),
       y: Math.round((+b[2] + +b[4]) / 2),
     });
@@ -200,13 +201,47 @@ function nodeMatches(n, args) {
     const want = norm(args.resource_id);
     if (!(exact ? (rid === want || tail === want) : (rid.includes(want) || tail.includes(want)))) return false;
   }
-  if (args.text && !cmp(n.text, args.text)) return false;
+  // 1.2.1: `text` ищет и по text, и по content-desc. У лаунчера Fire TV
+  // подписи лежат ТОЛЬКО в content-desc, и до этой правки text= не находил
+  // там ничего — при том что список «видны сейчас» показывал искомое,
+  // потому что печатался из (text || desc). Домен поиска и домен показа
+  // обязаны совпадать. `desc` остаётся узким — только content-desc.
+  if (args.text && !(cmp(n.text, args.text) || cmp(n.desc, args.text))) return false;
   if (args.desc && !cmp(n.desc, args.desc)) return false;
   return !!(args.resource_id || args.text || args.desc);
 }
 
-/** Устойчивое тождество узла: bounds смещаются при скролле, текст нет. */
-const nodeKey = n => `${n.resourceId}|${n.text}|${n.desc}`;
+/**
+ * Подпись узла. Контейнеры на ТВ-лаунчерах (view_app_card, item_view)
+ * фокусируемы, но текста не несут — он лежит в дочернем узле. Иерархии у
+ * нас нет (парсер плоский), поэтому потомок ищется геометрически: самый
+ * маленький подписанный узел, целиком лежащий внутри рамки этого.
+ */
+function nodeLabel(n, nodes) {
+  if (n.text) return n.text;
+  if (n.desc) return n.desc;
+  if (!nodes || !n.box) return '';
+  let best = null;
+  for (const c of nodes) {
+    if (c === n || !c.box || !(c.text || c.desc)) continue;
+    const b = c.box, o = n.box;
+    if (b[0] < o[0] || b[1] < o[1] || b[2] > o[2] || b[3] > o[3]) continue;
+    const area = (b[2] - b[0]) * (b[3] - b[1]);
+    if (!best || area < best.area) best = { area, label: c.text || c.desc };
+  }
+  return best ? best.label : '';
+}
+
+/**
+ * Устойчивое тождество узла: bounds смещаются при скролле, текст нет.
+ * 1.2.1: у безтекстовых контейнеров ключ был одинаковым для ВСЕХ карточек
+ * экрана (`...view_app_card||`) — цель находилась не та. Добавлена подпись
+ * из потомка, а если и её нет — рамка (хуже при скролле, но лучше коллизии).
+ */
+const nodeKey = (n, nodes) => {
+  const label = nodeLabel(n, nodes);
+  return `${n.resourceId}|${n.text}|${n.desc}|${label || n.bounds}`;
+};
 
 async function currentWindow(serial) {
   try {
@@ -238,17 +273,34 @@ async function findAndTap(args) {
   let hits = nodes.filter(n => nodeMatches(n, args));
 
   if (!hits.length) {
-    const visible = nodes.filter(n => n.text || n.desc)
-      .map(n => `  ${n.text || n.desc}${n.resourceId ? ` [id=${n.resourceId.split('/').pop()}]` : ''}`)
+    const visible = nodes.filter(n => nodeLabel(n, nodes))
+      .map(n => `  ${nodeLabel(n, nodes)}${n.resourceId ? ` [id=${n.resourceId.split('/').pop()}]` : ''}`)
       .slice(0, 40).join('\n');
     throw new Error(`Элемент не найден. Видны сейчас:\n${visible || '  (ничего с текстом)'}`);
   }
   if (hits.length > 1 && args.index === undefined) {
-    const list = hits.map((n, i) => `  [${i}] ${n.text || n.desc} @(${n.x},${n.y})`).join('\n');
+    const list = hits.map((n, i) => `  [${i}] ${nodeLabel(n, nodes)} @(${n.x},${n.y})`).join('\n');
     throw new Error(`Под критерий попало ${hits.length} элементов — уточни запрос или задай index:\n${list}`);
   }
   let target = hits[Math.min(Number(args.index) || 0, hits.length - 1)];
-  const targetKey = nodeKey(target);
+  const targetLabel = nodeLabel(target, nodes) || nodeKey(target, nodes);
+
+  // 1.2.1: на ТВ-лаунчерах подпись («Kinopub») лежит в нефокусируемом
+  // banner_image, а фокус DPAD встаёт на объемлющий view_app_card. Ведя
+  // обход к самой подписи, до неё не дойти никогда. Поэтому цель поднимается
+  // до наименьшего кликабельного узла, который её содержит.
+  if (!target.clickable && target.box) {
+    let host = null;
+    for (const c of nodes) {
+      if (c === target || !c.clickable || !c.box) continue;
+      const b = target.box, o = c.box;
+      if (b[0] < o[0] || b[1] < o[1] || b[2] > o[2] || b[3] > o[3]) continue;
+      const area = (o[2] - o[0]) * (o[3] - o[1]);
+      if (!host || area < host.area) host = { area, node: c };
+    }
+    if (host) target = host.node;
+  }
+  let targetKey = nodeKey(target, nodes);
   const winBefore = await currentWindow(serial);
 
   // ── Путь с настоящим тачскрином ──
@@ -256,7 +308,7 @@ async function findAndTap(args) {
     await adb(withSerial(serial, ['shell', `input tap ${target.x} ${target.y}`]));
     const winAfter = await currentWindow(serial);
     return text(
-      `Тап по «${target.text || target.desc}» @(${target.x},${target.y}) — у устройства есть touchscreen.\n` +
+      `Тап по «${targetLabel}» @(${target.x},${target.y}) — у устройства есть touchscreen.\n` +
       `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (это нормально для внутриэкранных действий)'}`);
   }
 
@@ -264,9 +316,15 @@ async function findAndTap(args) {
   if (!caps.leanback)
     throw new Error('У устройства нет ни touchscreen, ни leanback — как активировать элемент, неизвестно. Отказ вместо слепого тапа.');
 
-  const maxSteps = Math.min(Math.max(Number(args.max_steps) || 20, 1), 40);
+  // 1.2.1: дефолт снижен 20 → 12 и добавлен дедлайн по часам. Каждый шаг —
+  // полный uiautomator dump (~1.5–2 с), поэтому 20 шагов не укладывались в
+  // таймаут MCP-клиента: тул доходил до конца, а вызывающий видел
+  // «server isn't responding» и не получал отчёта вообще.
+  const maxSteps = Math.min(Math.max(Number(args.max_steps) || 12, 1), 40);
+  const deadline = Date.now() + 25000;
   const trail = [];
   let stuck = 0;
+  const visited = new Set();
 
   for (let step = 0; step < maxSteps; step++) {
     const cur = nodes.find(n => n.focused);
@@ -275,7 +333,26 @@ async function findAndTap(args) {
         `Фокус на экране не найден — вести DPAD'ом не от чего. ` +
         `Нажми любую клавишу (adb_key DPAD_DOWN) и повтори.${trail.length ? ` Пройдено: ${trail.join(' ')}` : ''}`);
     }
-    if (nodeKey(cur) === targetKey) break;
+    const curKey = nodeKey(cur, nodes);
+    if (curKey === targetKey) break;
+
+    // Зацикливание: фокус ходит по кругу между несколькими узлами (типично,
+    // когда цель нефокусируема и обход бьётся об неё слева-справа). Прежний
+    // детектор ловил только полную остановку — «фокус-то двигается».
+    if (visited.has(curKey)) {
+      throw new Error(
+        `Фокус зациклился: вернулся на «${nodeLabel(cur, nodes) || '(без подписи)'}», уже пройденный на этом обходе ` +
+        `(${trail.join(' ')}). Цель «${targetLabel}» недостижима обходом — скорее всего она нефокусируема. ` +
+        `НИЧЕГО НЕ НАЖАТО.`);
+    }
+    visited.add(curKey);
+
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Обход прерван по времени (${trail.length} шагов: ${trail.join(' ')}), чтобы вернуть отчёт, ` +
+        `а не молчание по таймауту. Сейчас в фокусе: «${nodeLabel(cur, nodes) || '(без подписи)'}», ` +
+        `цель «${targetLabel}» не достигнута. НИЧЕГО НЕ НАЖАТО.`);
+    }
 
     const dx = target.x - cur.x, dy = target.y - cur.y;
     const primary = Math.abs(dx) > Math.abs(dy)
@@ -290,19 +367,19 @@ async function findAndTap(args) {
     trail.push(dir.replace('DPAD_', ''));
     await new Promise(r => setTimeout(r, 350));
 
-    const prevKey = nodeKey(cur);
+    const prevKey = curKey;
     nodes = parseUiNodes(await uiXmlFresh(serial));
     const now = nodes.find(n => n.focused);
     // цель могла сместиться при скролле — переищем её по тексту
-    const again = nodes.find(n => nodeKey(n) === targetKey);
+    const again = nodes.find(n => nodeKey(n, nodes) === targetKey);
     if (again) target = again;
 
-    if (now && nodeKey(now) === prevKey) {
+    if (now && nodeKey(now, nodes) === prevKey) {
       stuck++;
       if (stuck >= 2)
         throw new Error(
-          `Фокус не двигается ни по одной оси, остался на «${now.text || now.desc}». ` +
-          `Цель «${target.text || target.desc}» не достигнута за ${step + 1} шагов (${trail.join(' ')}). ` +
+          `Фокус не двигается ни по одной оси, остался на «${nodeLabel(now, nodes) || '(без подписи)'}». ` +
+          `Цель «${targetLabel}» не достигнута за ${step + 1} шагов (${trail.join(' ')}). ` +
           `Ничего не нажато — веди вручную через adb_key.`);
     } else {
       stuck = 0;
@@ -310,10 +387,10 @@ async function findAndTap(args) {
   }
 
   const finalFocus = nodes.find(n => n.focused);
-  if (!finalFocus || nodeKey(finalFocus) !== targetKey)
+  if (!finalFocus || nodeKey(finalFocus, nodes) !== targetKey)
     throw new Error(
       `За ${maxSteps} шагов фокус до цели не дошёл (${trail.join(' ')}). ` +
-      `Сейчас в фокусе: «${finalFocus ? (finalFocus.text || finalFocus.desc) : 'ничего'}». ` +
+      `Сейчас в фокусе: «${finalFocus ? (nodeLabel(finalFocus, nodes) || '(без подписи)') : 'ничего'}». ` +
       `НИЧЕГО НЕ НАЖАТО. Увеличь max_steps или веди вручную.`);
 
   await adb(withSerial(serial, ['shell', 'input keyevent DPAD_CENTER']));
@@ -321,7 +398,7 @@ async function findAndTap(args) {
   const winAfter = await currentWindow(serial);
 
   return text(
-    `Активировано «${target.text || target.desc}» через DPAD (устройство leanback, touchscreen нет).\n` +
+    `Активировано «${targetLabel}» через DPAD (устройство leanback, touchscreen нет).\n` +
     `Путь: ${trail.length ? trail.join(' → ') : 'уже было в фокусе'} → CENTER\n` +
     `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (нормально для внутриэкранных действий)'}`);
 }

@@ -231,12 +231,38 @@ async function actInfo(serial, args) {
 async function actLaunch(serial, args) {
   const pkg = coerceArray(args.packages || args.package)[0];
   if (!pkg) throw new Error('action=launch требует packages');
-  // monkey запускает главную активность, не требуя знать её имя
+  // monkey запускает главную активность, не требуя знать её имя — но ТОЛЬКО
+  // если у пакета объявлена категория LAUNCHER. У X-plore в MAIN-активности
+  // лишь DEFAULT/BROWSABLE: monkey выходит с rc=251, ничего не инжектит и
+  // печатает безобидную строку про SYS_KEYS. До 1.2.1 это шло как «Launched».
+  // Признак настоящего запуска один — «Events injected».
   const out = await adbSh(serial,
     `monkey -p ${sq(pkg)} -c android.intent.category.LAUNCHER 1 2>&1 | tail -n 3`);
-  if (/No activities found|Error/i.test(out))
-    throw new Error(`Не удалось запустить ${pkg}: ${out.trim()}`);
-  return text(`Launched ${pkg}\n${out.trim()}`);
+  if (/Events injected:\s*[1-9]/.test(out))
+    return text(`Launched ${pkg} (monkey)\n${out.trim()}`);
+
+  // Фолбэк: спросить у системы имя главной активности и стартовать явно.
+  const act = (await adbSh(serial,
+    `cmd package resolve-activity --brief ${sq(pkg)} 2>/dev/null | tail -n 1`)).trim();
+  if (!/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(act))
+    throw new Error(
+      `Не удалось запустить ${pkg}: monkey ничего не инжектил (нет категории LAUNCHER?), ` +
+      `а главная активность не определяется — resolve-activity вернул «${act || 'пусто'}». ` +
+      `Вывод monkey: ${out.trim()}`);
+
+  const started = await adbSh(serial, `am start -n ${sq(act)} 2>&1`);
+  if (/Error|Exception/i.test(started))
+    throw new Error(`Не удалось запустить ${pkg} через ${act}: ${started.trim()}`);
+
+  // Не верим на слово ни monkey, ни am — сверяем, кто реально в фокусе.
+  await new Promise(r => setTimeout(r, 1200));
+  const focus = await adbSh(serial,
+    'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus');
+  const ok = focus.includes(pkg);
+  return text(
+    `Launched ${pkg} через ${act} (monkey не сработал — у пакета нет категории LAUNCHER).\n` +
+    (ok ? 'В фокусе подтверждён этот пакет.'
+        : `⚠ В фокусе НЕ он: ${focus.trim() || '(фокус не определён)'} — окно могло не успеть открыться.`));
 }
 
 async function actStopOrClear(serial, args, action) {

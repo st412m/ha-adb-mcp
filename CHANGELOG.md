@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.1
+Fixes found by the 1.2.0 acceptance run on three live devices (Fire TV SDK 28, Shield SDK 30, TiVo SDK 31). The `.apks` feature passed that run unchanged; everything below is `adb_find_and_tap`, plus one older `adb_app` defect the same session exposed.
+
+**`text` now matches content-desc as well, not just the text attribute.** On the Fire TV launcher every label lives in `content-desc` and `text` is empty, so `text="Find"` returned "element not found" — while the very same error listed `Find` among the visible elements, because that list was built from `text || content-desc`. The tool searched one set of fields and reported another. On Google TV launchers (Shield, TiVo) the labels are real `text`, so testing only there would have shown nothing wrong. `desc` stays narrow and matches content-desc only.
+
+**An unfocusable label is retargeted to the element that actually takes focus.** TV launchers put the app name in a non-focusable `banner_image` inside a focusable `view_app_card`; walking towards the label itself could never arrive. The target is now raised to the smallest clickable node containing the match.
+
+**Nodes without text are told apart.** Node identity was `resource-id|text|content-desc`, which is identical for every app card on a launcher screen — the walk could aim at the wrong one. Identity now includes the label recovered from the enclosing node's children.
+
+**Cycling focus is detected.** The previous check only caught focus that stopped dead. When a target cannot be reached, the walk typically ping-pongs between two neighbours (`UP LEFT RIGHT LEFT RIGHT LEFT` was observed), which looked like progress and burned every step. Visited nodes are now remembered and a repeat aborts with a report.
+
+**The walk is bounded by time, not just steps.** Each step re-dumps the UI (~1.5-2s), so the old default of 20 steps could outlast the MCP client's timeout: the tool ran to completion and the caller saw a transport error instead of the report. Default is now 12 steps with an internal ~25s budget that stops early and explains where it got to.
+
+**Failure reports name the element.** When focus sat on a container with no text of its own, reports read `now focused: ""`, losing the one detail they exist to convey.
+
+**`adb_app action=launch` no longer claims success when nothing started.** `monkey -c android.intent.category.LAUNCHER` exits 251 and injects nothing for a package that does not declare the LAUNCHER category — X-plore declares only DEFAULT and BROWSABLE — and the harmless `SYS_KEYS` line it prints was being reported as a launch. Success is now determined by `Events injected`, with a fallback that resolves the main activity via `cmd package resolve-activity` and starts it explicitly, then confirms against the focused window.
+
+**An ABI refusal names the ABI that was actually asked for.** Forcing `abi=` produced a message listing the *device's* ABIs and then contradicting itself by showing one of them as present in the bundle.
+
 ## 1.2.0
 Two features that were blocked until the 1.1.1 property fixes landed — split selection reads the device locale and density, and both were wrong before.
 

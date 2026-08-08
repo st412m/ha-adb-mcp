@@ -169,7 +169,9 @@ function chooseSplits(names, props, opts = {}) {
     const hit = want.map(a => abiItems.find(i => i.value === a)).find(Boolean);
     if (!hit) {
       throw new Error(
-        `в бандле нет сплита ни под один ABI устройства (${(props.abilist || []).join(', ') || 'ABI не определён'}). ` +
+        (opts.abi
+          ? `в бандле нет сплита под запрошенный ABI «${opts.abi}» (устройство сообщает: ${(props.abilist || []).join(', ') || 'ABI не определён'}). `
+          : `в бандле нет сплита ни под один ABI устройства (${(props.abilist || []).join(', ') || 'ABI не определён'}). `) +
         `Есть: ${abiItems.map(i => i.value).join(', ')}. Установка отменена — неверный ABI даёт неработающее приложение.`);
     }
     chosen.push(hit.name);

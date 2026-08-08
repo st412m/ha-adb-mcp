@@ -75,14 +75,14 @@ const TOOLS = [
     description:
       'Find an on-screen element by text, resource-id or content-desc and activate it in one call — no need to read a UI dump and pick coordinates yourself.\n' +
       'How it activates the element is DERIVED from the device, not assumed: if the device reports android.hardware.touchscreen it taps the element centre; if it is a leanback (TV) device without a touchscreen, a coordinate tap would hit whatever currently HAS FOCUS instead — a silent miss — so the element is reached by walking the focus there with DPAD keys and then pressing DPAD_CENTER.\n' +
-      'Every step is verified: the UI is re-dumped after each key and the focus is checked. If the focus stops moving, or the target is not reached within max_steps, the tool reports exactly where it got stuck and presses NOTHING rather than guessing.',
+      'Every step is verified: the UI is re-dumped after each key and the focus is checked. If the focus stops moving, starts cycling between the same nodes, or the target is not reached within max_steps or the internal time budget, the tool reports exactly where it got stuck and presses NOTHING rather than guessing.',
     inputSchema: { type: 'object', properties: {
-      text: { type: 'string', description: 'Visible label to match (substring by default, case-insensitive)' },
+      text: { type: 'string', description: 'Visible label to match, checked against BOTH the text attribute and content-desc (substring by default, case-insensitive). Some TV launchers, Fire TV among them, put every label in content-desc and leave text empty.' },
       resource_id: { type: 'string', description: 'resource-id; the part after "/" is enough' },
       desc: { type: 'string', description: 'content-desc to match' },
       exact: { type: 'boolean', description: 'Require an exact match instead of substring. Default false.' },
       index: { type: 'number', description: 'Which match to use when several elements match. Without it, several matches are an error listing the candidates.' },
-      max_steps: { type: 'number', description: 'Max DPAD steps on leanback devices, default 20, max 40' },
+      max_steps: { type: 'number', description: 'Max DPAD steps on leanback devices, default 12, max 40. Each step re-dumps the UI (~1.5-2s), and the walk also stops after an internal ~25s budget so you get a report instead of a client timeout.' },
       serial: { type: 'string' }
     } }
   },
