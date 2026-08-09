@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.3
+Everything left open by v1.2.2, confirmed against live devices first — this round added a Galaxy S22 on Android 16 and a Galaxy Watch 6 on Wear OS 6 to the three TV boxes.
+
+**`action=launch` now finds activities it previously gave up on.** Launching a package by name turned out to be more awkward than one category covers. TV apps declare their MAIN activity under `LEANBACK_LAUNCHER` rather than `LAUNCHER`, so `monkey` refused and the fallback found nothing — `com.android.tv.settings` could not be launched at all. Some phone packages do the same. Others declare neither and resolve only to a bare `MAIN` query, which is the norm on Wear OS. The chain is now `monkey LAUNCHER`, `monkey LEANBACK_LAUNCHER`, then `resolve-activity` against `MAIN`+`LAUNCHER`, `MAIN`+`LEANBACK_LAUNCHER` and plain `MAIN`. When nothing resolves, the error lists every attempt rather than naming one guessed cause.
+
+**A resolved activity belonging to another package is now rejected.** `resolve-activity -a MAIN` returns `android/com.android.internal.app.ResolverActivity` — the system chooser, not the app — and on Android 16 it does so for almost every package that lacks a launcher category. It matches the `package/activity` shape, so the previous code would have started the chooser dialog and reported a launch. Any activity whose package differs from the one requested is discarded and the next query is tried.
+
+**A listening socket is no longer attributed to every package sharing a uid.** The network signal in `adb_app`'s protected set maps a socket's uid back to packages, but a uid is not a package: under a shared `sharedUserId` — `android.uid.system` above all — much of a firmware can sit together. On the watch, the ADB pairing daemon's socket belongs to uid 1000, which 38 packages share, and all 38 were reported as network listeners. The error was in the safe direction, since surplus packages merely became protected, but a signal meant to be specific stopped meaning anything. A uid spread across more than three packages, or owning no package at all, is now reported separately under `net_unattributed` instead of being pinned on a guess.
+
+**An absent subsystem reads differently from a failed probe.** `dumpsys webviewupdate` returns nothing on Wear OS because there is no WebView provider there, and the note said the source could not be determined — sending the reader to look for a fault that does not exist. An empty answer now says the subsystem is not present on this device.
+
+**XML entities are decoded in labels.** `uiautomator` returns XML, so newlines and reserved characters arrived escaped and were printed raw — `07:32&#10;New notifications` on the watch face, for one. Numeric forms are expanded too, and `&amp;` last, so an escaped entity is not expanded twice. This affects `adb_ui_dump` as well as the search.
+
+**Duplicate labels collapse in the remaining case.** The 1.2.2 de-duplication keyed on label plus resource-id, which still left a container with no id and its captioned child as two lines. Entries are now collapsed by label alone, keeping the variant that carries an id.
+
 ## 1.2.2
 Follow-up to the 1.2.1 acceptance run, which added a fourth device to the fleet — a Samsung S20 FE (SDK 33, arm64-v8a, 480 dpi, and a real touchscreen). Two cosmetic consequences of the 1.2.1 label handling, and one correction to the record.
 

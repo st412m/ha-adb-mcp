@@ -54,6 +54,25 @@ async function screenshot(args) {
   return [{ type: 'image', data, mimeType: 'image/jpeg' }];
 }
 
+/**
+ * uiautomator отдаёт XML, поэтому переводы строк и служебные символы в
+ * подписях приезжают сущностями. 1.2.3: до этого они попадали в вывод сырыми —
+ * `Если вам нравится X-plore,&#10;здесь можно...`. Числовые формы (&#10;,
+ * &#x41;) раскрываем тоже, а `&amp;` — последним, иначе `&amp;lt;`
+ * превратился бы в `<`.
+ */
+function decodeXmlEntities(s) {
+  if (!s || s.indexOf('&') === -1) return s;
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 /** Разбор дампа uiautomator в структуру. */
 function parseUiNodes(xml) {
   const nodes = [];
@@ -68,8 +87,8 @@ function parseUiNodes(xml) {
     const bounds = attr('bounds');
     const b = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
     const clickable = attr('clickable') === 'true';
-    const txt = attr('text');
-    const desc = attr('content-desc');
+    const txt = decodeXmlEntities(attr('text'));
+    const desc = decodeXmlEntities(attr('content-desc'));
     const rid = attr('resource-id');
     const focused = attr('focused') === 'true';
     if (!clickable && !txt && !desc && !focused) continue;
@@ -273,19 +292,24 @@ async function findAndTap(args) {
   let hits = nodes.filter(n => nodeMatches(n, args));
 
   if (!hits.length) {
-    // 1.2.2: подписи теперь подтягиваются из потомков, поэтому контейнер и
-    // его подпись давали ДВЕ одинаковые строки («Назад», «Назад»), а на
-    // трёхуровневой вёрстке и три. Для читаемости списка дубли схлопываем —
-    // на поиск это не влияет, список только показывается.
-    const seen = new Set();
-    const visible = [];
+    // 1.2.2: подписи подтягиваются из потомков, поэтому контейнер и его
+    // подпись давали ДВЕ одинаковые строки («Назад», «Назад»).
+    // 1.2.3: ключ был «подпись|id», а у контейнера id обычно нет — пара
+    // «контейнер без id + потомок с id» так и оставалась двумя строками
+    // (`сб, 8 августа` и `сб, 8 августа [id=common_date]`). Схлопываем по
+    // ОДНОЙ подписи, оставляя вариант с id: он информативнее. На поиск это
+    // не влияет — список только показывается.
+    const byLabel = new Map();
     for (const n of nodes) {
       const label = nodeLabel(n, nodes);
       if (!label) continue;
       const tail = n.resourceId ? n.resourceId.split('/').pop() : '';
-      const k = `${label}|${tail}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
+      const prev = byLabel.get(label);
+      if (prev === undefined) byLabel.set(label, tail);
+      else if (!prev && tail) byLabel.set(label, tail);
+    }
+    const visible = [];
+    for (const [label, tail] of byLabel) {
       visible.push(`  ${label}${tail ? ` [id=${tail}]` : ''}`);
       if (visible.length >= 40) break;
     }
@@ -434,5 +458,5 @@ async function findAndTap(args) {
 module.exports = {
   screenshot, uiDump, tap, swipe, typeText, key, findAndTap,
   parseUiNodes, formatUiNodes, uiXmlFresh, screenshotPipeline,
-  deviceCaps, nodeMatches, nodeKey,
+  deviceCaps, nodeMatches, nodeKey, decodeXmlEntities,
 };

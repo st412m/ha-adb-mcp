@@ -383,22 +383,58 @@ async function netListeners(serial) {
     void lAddr;
   }
 
+  // ⚠ 1.2.3: uid НЕ равен пакету. Под общим uid (sharedUserId, прежде всего
+  // android.uid.system = 1000) может сидеть половина прошивки, и тогда ОДИН
+  // сокет приписывался КАЖДОМУ из них. Живой случай: на Galaxy Watch 6
+  // (Wear OS 6) сокет демона сопряжения ADB на порту 40239 принадлежит
+  // uid 1000, а этот uid делят 38 пакетов — все 38 и попали в признак.
+  // Ошибка была в безопасную сторону (лишние пакеты просто защищались), но
+  // признак задумывался точечным и переставал что-либо значить.
+  // Поэтому: uid, размазанный по многим пакетам, НЕ атрибутируется никому —
+  // такой сокет честнее показать отдельно, чем приписать наугад.
+  const SHARED_UID_LIMIT = 3;
   const byPackage = {};
+  const unattributed = [];
+
   for (const [uid, ports] of Object.entries(listening)) {
-    for (const pkg of (byUid[uid] || [])) {
+    const owners = byUid[uid] || [];
+    const portList = Array.from(ports).sort((a, b) => a - b);
+
+    const external = [];
+    for (const e of established) {
+      if (e.uid !== uid || !ports.has(e.lport)) continue;
+      if (isLoopback(e.peer)) continue;   // клиент на том же устройстве — не внешняя зависимость
+      const tag = `${e.peer} → :${e.lport}`;
+      if (!external.includes(tag)) external.push(tag);
+    }
+
+    if (!owners.length || owners.length > SHARED_UID_LIMIT) {
+      unattributed.push({
+        uid,
+        ports: portList,
+        serving: external,
+        owners: owners.length,
+        why: owners.length
+          ? `uid делят ${owners.length} пакетов (общий sharedUserId) — какой именно слушает, из /proc/net/tcp не видно`
+          : 'у uid нет установленных пакетов (системный демон вне пакетной модели)',
+      });
+      continue;
+    }
+
+    for (const pkg of owners) {
       const entry = byPackage[pkg] || { ports: [], serving: [] };
-      entry.ports = Array.from(new Set([...entry.ports, ...ports])).sort((a, b) => a - b);
-      for (const e of established) {
-        if (e.uid !== uid || !ports.has(e.lport)) continue;
-        if (isLoopback(e.peer)) continue;   // клиент на том же устройстве — не внешняя зависимость
-        const tag = `${e.peer} → :${e.lport}`;
-        if (!entry.serving.includes(tag)) entry.serving.push(tag);
-      }
+      entry.ports = Array.from(new Set([...entry.ports, ...portList])).sort((a, b) => a - b);
+      for (const tag of external) if (!entry.serving.includes(tag)) entry.serving.push(tag);
       byPackage[pkg] = entry;
     }
   }
 
-  return { byPackage, note: null };
+  const note = unattributed.length
+    ? `ℹ сетевой признак: ${unattributed.length} слушающих uid не привязаны к пакету ` +
+      `(общий sharedUserId или демон вне пакетной модели) — эти сокеты в защите НЕ УЧТЕНЫ, см. net_unattributed`
+    : null;
+
+  return { byPackage, unattributed, note };
 }
 
 /**
@@ -465,7 +501,15 @@ async function protectedSet(serial, opts = {}) {
     const raw = extract(out);
     const pkg = pkgOf(raw);
     if (!looksLikePackage(pkg)) {
-      notes.push(`⚠ ${humanName}: определить не удалось (ответ: ${JSON.stringify(String(raw || '').slice(0, 80))}) — источник НЕ УЧТЁН В ЗАЩИТЕ`);
+      // 1.2.3: пустой ответ и мусорный ответ — разные вещи. Пустой обычно
+      // значит, что подсистемы на устройстве просто НЕТ: на Wear OS,
+      // например, `dumpsys webviewupdate` не отвечает ничего, потому что
+      // WebView-провайдера там не бывает. Писать про такое «определить не
+      // удалось» — значит гнать читателя искать поломку, которой нет.
+      const empty = !String(raw || '').trim();
+      notes.push(empty
+        ? `ℹ ${humanName}: на этом устройстве подсистемы нет (ответ пустой) — источник не применим, в защите не учитывается`
+        : `⚠ ${humanName}: определить не удалось (ответ: ${JSON.stringify(String(raw || '').slice(0, 80))}) — источник НЕ УЧТЁН В ЗАЩИТЕ`);
       return;
     }
     sources[key] = pkg;
@@ -546,6 +590,7 @@ async function protectedSet(serial, opts = {}) {
     else advisories.push({ package: pkg, signal: 'authenticator', system: false, detail: `${where} — отключение может унести связанные аккаунты` });
   }
   if (Object.keys(netSystem).length) sources.net_listener = netSystem;
+  if (net.unattributed && net.unattributed.length) sources.net_unattributed = net.unattributed;
   if (Object.keys(authSystem).length) sources.authenticator = authSystem;
 
   // Стек аккаунта по именам — ТЕПЕРЬ ДОПОЛНИТЕЛЬНЫЙ источник, а не

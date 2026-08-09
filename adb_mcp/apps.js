@@ -231,28 +231,55 @@ async function actInfo(serial, args) {
 async function actLaunch(serial, args) {
   const pkg = coerceArray(args.packages || args.package)[0];
   if (!pkg) throw new Error('action=launch требует packages');
-  // monkey запускает главную активность, не требуя знать её имя. Но он умеет
-  // отказать молча: выйти с rc=251, ничего не инжектить и напечатать
-  // безобидную строку про SYS_KEYS — до 1.2.1 это шло как «Launched».
-  // Наблюдалось на Fire OS 7 в первые минуты после install-multiple, когда
-  // PackageManager ещё не перестроил список запускаемых активностей:
-  // resolve-activity уже отвечал, monkey ещё нет. На Samsung SDK 33 тот же
-  // сценарий сразу после установки проходит штатно, так что это особенность
-  // прошивки, а не общее правило. Признак настоящего запуска один —
-  // «Events injected»; причина отказа значения не имеет.
-  const out = await adbSh(serial,
-    `monkey -p ${sq(pkg)} -c android.intent.category.LAUNCHER 1 2>&1 | tail -n 3`);
-  if (/Events injected:\s*[1-9]/.test(out))
-    return text(`Launched ${pkg} (monkey)\n${out.trim()}`);
+  // Запуск пакета по имени — задача неожиданно склочная, и 1.2.3 переписала
+  // её после охоты по живым устройствам (Shield, Fire OS, Android 16).
+  //
+  // Что выяснилось:
+  //  · monkey с категорией LAUNCHER молча отказывает — rc != 0, ноль
+  //    инжектов, иногда лишь строка про SYS_KEYS. Признак настоящего
+  //    запуска один: «Events injected».
+  //  · У ТВ-приложений MAIN объявлен с LEANBACK_LAUNCHER, а не LAUNCHER
+  //    (com.android.tv.settings). Одной категории мало.
+  //  · Бывает и без обеих: у com.nvidia.shield.welcome активность находится
+  //    только запросом MAIN вообще без категории.
+  //  · ⚠ И главная ловушка: `resolve-activity -a MAIN` для tv.settings
+  //    отдаёт `android/com.android.internal.app.ResolverActivity` — системный
+  //    диалог выбора, а не приложение. Формату «пакет/активность» он
+  //    соответствует, поэтому проверять надо ПРИНАДЛЕЖНОСТЬ активности
+  //    запрошенному пакету, иначе тул запустит не то и отчитается об успехе.
+  const CATS = ['android.intent.category.LAUNCHER', 'android.intent.category.LEANBACK_LAUNCHER'];
+  const tried = [];
+
+  for (const cat of CATS) {
+    const out = await adbSh(serial, `monkey -p ${sq(pkg)} -c ${cat} 1 2>&1 | tail -n 3`);
+    if (/Events injected:\s*[1-9]/.test(out))
+      return text(`Launched ${pkg} (monkey, ${cat.split('.').pop()})\n${out.trim()}`);
+    tried.push(`monkey ${cat.split('.').pop()}: не инжектил`);
+  }
 
   // Фолбэк: спросить у системы имя главной активности и стартовать явно.
-  const act = (await adbSh(serial,
-    `cmd package resolve-activity --brief ${sq(pkg)} 2>/dev/null | tail -n 1`)).trim();
-  if (!/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(act))
+  let act = '';
+  for (const q of [`-a android.intent.action.MAIN -c ${CATS[0]}`,
+                   `-a android.intent.action.MAIN -c ${CATS[1]}`,
+                   '-a android.intent.action.MAIN']) {
+    const r = (await adbSh(serial,
+      `cmd package resolve-activity --brief ${q} ${sq(pkg)} 2>/dev/null | tail -n 1`)).trim();
+    if (!/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(r)) { tried.push(`resolve ${q}: ${r || 'пусто'}`); continue; }
+    if (r.split('/')[0] !== pkg) {
+      // ResolverActivity и прочие чужие активности — не наш пакет.
+      tried.push(`resolve ${q}: ${r} — активность ЧУЖОГО пакета, отброшена`);
+      continue;
+    }
+    act = r;
+    break;
+  }
+
+  if (!act)
     throw new Error(
-      `Не удалось запустить ${pkg}: monkey ничего не инжектил (нет категории LAUNCHER?), ` +
-      `а главная активность не определяется — resolve-activity вернул «${act || 'пусто'}». ` +
-      `Вывод monkey: ${out.trim()}`);
+      `Не удалось запустить ${pkg}: главная активность не определяется.\n` +
+      tried.map(t => `  · ${t}`).join('\n') +
+      `\nПосмотри \`adb_shell cmd package query-activities -a android.intent.action.MAIN\` — ` +
+      `возможно, у пакета нет запускаемой активности вовсе (сервис, провайдер, оверлей).`);
 
   const started = await adbSh(serial, `am start -n ${sq(act)} 2>&1`);
   if (/Error|Exception/i.test(started))
@@ -264,7 +291,7 @@ async function actLaunch(serial, args) {
     'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus');
   const ok = focus.includes(pkg);
   return text(
-    `Launched ${pkg} через ${act} (monkey не сработал — у пакета нет категории LAUNCHER).\n` +
+    `Launched ${pkg} через ${act} (monkey не сработал: ${tried[0]}).\n` +
     (ok ? 'В фокусе подтверждён этот пакет.'
         : `⚠ В фокусе НЕ он: ${focus.trim() || '(фокус не определён)'} — окно могло не успеть открыться.`));
 }
