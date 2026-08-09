@@ -285,15 +285,34 @@ async function actLaunch(serial, args) {
   if (/Error|Exception/i.test(started))
     throw new Error(`Не удалось запустить ${pkg} через ${act}: ${started.trim()}`);
 
-  // Не верим на слово ни monkey, ни am — сверяем, кто реально в фокусе.
+  // Не верим на слово ни monkey, ни am — сверяем, что поднялось на самом деле.
+  //
+  // ⚠ 1.2.4: раньше сверка шла по `mCurrentFocus`, и это плохой свидетель.
+  // На Shield он равен `null` даже когда лаунчер жив и активен, так что
+  // предупреждение срабатывало там, где сверять было попросту нечем.
+  // Настоящий ответ даёт резюмированная активность; `mCurrentFocus`
+  // оставлен вторым мнением для прошивок, где первого нет.
   await new Promise(r => setTimeout(r, 1200));
-  const focus = await adbSh(serial,
-    'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus');
-  const ok = focus.includes(pkg);
+  const resumed = (await adbSh(serial,
+    'dumpsys activity activities 2>/dev/null | grep -m1 -E "mResumedActivity|ResumedActivity"')).trim();
+  const focus = (await adbSh(serial,
+    'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus')).trim();
+
+  if (resumed.includes(pkg) || focus.includes(pkg))
+    return text(
+      `Launched ${pkg} через ${act} (monkey не сработал: ${tried[0]}).\n` +
+      `Пакет подтверждён на переднем плане.`);
+
+  // Активность стартовала без ошибки, но наверху её нет. Чаще всего это
+  // не гонка, а самозакрытие: мастера первичной настройки и подобные
+  // экраны проверяют своё условие и сразу finish() — так ведёт себя
+  // com.nvidia.shield.welcome на Shield. Гадать не будем, покажем факты.
+  const seen = resumed || focus;
   return text(
-    `Launched ${pkg} через ${act} (monkey не сработал: ${tried[0]}).\n` +
-    (ok ? 'В фокусе подтверждён этот пакет.'
-        : `⚠ В фокусе НЕ он: ${focus.trim() || '(фокус не определён)'} — окно могло не успеть открыться.`));
+    `⚠ ${pkg}: активность ${act} запущена без ошибки, но на переднем плане её НЕТ.\n` +
+    `Сейчас наверху: ${seen || '(определить не удалось — ни ResumedActivity, ни mCurrentFocus)'}\n` +
+    `Обычная причина — активность закрыла себя сама (мастер настройки, экран-заглушка), ` +
+    `реже приложению не хватило времени. Проверь adb_screenshot, если это важно.`);
 }
 
 async function actStopOrClear(serial, args, action) {

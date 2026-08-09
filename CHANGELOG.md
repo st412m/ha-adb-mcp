@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.4
+One fix, found while accepting 1.2.3 on hardware.
+
+**A launch is confirmed against the resumed activity, not the focused window.** After the explicit `am start` fallback, the tool checked `mCurrentFocus` to see whether the package had actually come up. On a Shield that field reads `null` even while the launcher is alive and resumed, so the check had nothing to compare and warned regardless. The resumed activity is now the primary witness, with `mCurrentFocus` kept as a second opinion for firmware that lacks the first.
+
+The wording of the warning was wrong too. It blamed timing — "the window may not have opened yet" — when the usual cause is the opposite: the activity started and closed itself. Setup wizards and placeholder screens check their condition and call `finish()` immediately, which is exactly what `com.nvidia.shield.welcome` does. The message now states what is on top instead of guessing why.
+
 ## 1.2.3
 Everything left open by v1.2.2, confirmed against live devices first — this round added a Galaxy S22 on Android 16 and a Galaxy Watch 6 on Wear OS 6 to the three TV boxes.
 
