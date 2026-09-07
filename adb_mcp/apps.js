@@ -20,6 +20,19 @@
  *     Для СИСТЕМНЫХ пакетов он обратим (`cmd package install-existing`,
  *     проверено на Fire OS 7); необратимо только удаление сайдлоуда, чей
  *     APK больше нигде не лежит — отсюда обязательный бэкап.
+ *  6. (1.2.5) Сетевой гард на разрушающих действиях: пакет, который ПРЯМО
+ *     СЕЙЧАС обслуживает клиента вне устройства (LISTEN + входящее
+ *     ESTABLISHED с не-loopback адреса), не отключается, не удаляется, не
+ *     останавливается и не чистится без явного `force_network`. Признак
+ *     снимается с устройства и потому работает на ЧУЖОМ железе, где канал
+ *     интеграции держит другой пакет — список имён в коде защитил бы только
+ *     ту квартиру, в которой его составили.
+ *
+ *     ⚠ У гарда СВОЙ флаг, отдельный от `force`. Первая редакция вешала оба
+ *     на `force`, и это было ошибкой: `force` существует, чтобы продолжить
+ *     при упавшем бэкапе APK, то есть его выставляют, думая про бэкап, — и
+ *     заодно молча сняли бы защиту от обрыва живой службы. Один флаг на два
+ *     несвязанных риска превращает осознанное решение в побочный эффект.
  */
 
 const fs = require('fs');
@@ -28,7 +41,10 @@ const {
   adb, adbSh, withSerial, sq, text, json,
   coerceArray, coerceBool, resolveSafeHostPath, ensureDir, sanitizeSerial,
 } = require('./adb.js');
-const { getProps, listPackages, accountSnapshot, protectedSet } = require('./device.js');
+const {
+  getProps, listPackages, accountSnapshot, protectedSet,
+  netListeners, servingHits, servingRefusal,
+} = require('./device.js');
 
 const ALLOW_UNINSTALL = process.env.ALLOW_UNINSTALL === 'true';
 const DEFAULT_STORE = '/media/adb-mcp';
@@ -182,6 +198,63 @@ async function canaryCheck(serial, baseline) {
   return result;
 }
 
+// ------------------------------------------------------------ сетевой гард
+
+/**
+ * Отказать, если хоть один из пакетов ПРЯМО СЕЙЧАС обслуживает клиента вне
+ * устройства. Признак и его разбор живут в device.js — здесь только решение.
+ *
+ * Почему это отдельный ярус, а не строчка в protected-наборе. Protected-набор
+ * отвечает на вопрос «можно ли этот пакет потерять» и потому применим лишь к
+ * disable/uninstall. Гард отвечает на другой — «прервётся ли прямо сейчас
+ * чья-то живая работа», и он применим ещё и к force-stop с clear, у которых
+ * защиты не было вовсе.
+ *
+ * Порядок важен: гард проверяется РАНЬШЕ protected-набора. Отказ гарда
+ * называет порт и удалённый адрес, то есть говорит, что именно сломается,
+ * а отказ protected-набора — только что пакет в списке. При этом `force_network`
+ * снимает ТОЛЬКО гард: системный пакет после него упрётся в protected-набор,
+ * у которого обхода нет и не будет. `force` (провал бэкапа APK) гард НЕ
+ * снимает — это разные риски и разные решения.
+ *
+ * Если сам признак не снялся (шелл не смог прочитать /proc/net) — это не
+ * повод молча продолжить и не повод запретить всё: гард сообщает, что он
+ * слеп, и вызывающий видит это в выдаче. Молчание здесь было бы ровно тем,
+ * от чего защищается весь модуль.
+ */
+async function networkGuard(serial, packages, what, forceNetwork, netSnapshot) {
+  let net = netSnapshot;
+  if (!net) {
+    try {
+      net = await netListeners(serial);
+    } catch (e) {
+      net = { ok: false, byPackage: {}, byUid: {}, unattributed: [],
+        note: `сетевой признак не опрошен (${e.message}) — ГАРД НЕ РАБОТАЛ` };
+    }
+  }
+
+  const hits = servingHits(net, packages);
+  if (hits.length && !forceNetwork) throw new Error(servingRefusal(hits, what));
+
+  return {
+    hits,
+    overridden: hits,          // непусто только при force_network: иначе был бы throw
+    blind: net.ok === false,
+    note: net.note || null,
+    net,
+  };
+}
+
+/** Как гард выглядит в JSON-выдаче. Слепой гард обязан быть виден. */
+function guardReport(guard) {
+  if (guard.blind)
+    return { status: 'СЛЕП', note: guard.note, checked: false,
+      why: 'признак не снялся с устройства — разрушающее действие выполняется БЕЗ сетевой проверки' };
+  if (guard.overridden.length)
+    return { status: 'ПЕРЕКРЫТ force_network=true', checked: true, overridden: guard.overridden, note: guard.note };
+  return { status: 'чисто', checked: true, note: guard.note };
+}
+
 // ------------------------------------------------------------------ действия
 
 async function actList(serial, args) {
@@ -319,12 +392,36 @@ async function actStopOrClear(serial, args, action) {
   const packages = coerceArray(args.packages || args.package).filter(Boolean);
   if (!packages.length) throw new Error(`action=${action} требует packages`);
   const dryRun = coerceBool(args.dry_run, action === 'clear');  // clear стирает данные — по умолчанию dry_run
+  const forceNetwork = coerceBool(args.force_network, false);
+
+  // Сетевой гард (1.2.5). До него у stop и clear не было НИКАКОЙ защиты:
+  // protected-набор проверяется только в disable/uninstall, а `am force-stop`
+  // на пакете, который держит канал интеграции, отключает её ровно так же —
+  // просто до следующего запуска сервиса, а не насовсем. `pm clear` хуже:
+  // он и останавливает, и стирает данные, то есть на службе пульта унесёт
+  // сопряжение. Поэтому гард стоит на обоих, хотя в ТЗ назван force-stop.
+  //
+  // ⚠ Штатное умолчание `stop` — dry_run=false, то есть один вызов без
+  // единого параметра сразу что-то останавливал. Это и есть та дыра.
+  const guard = await networkGuard(serial, packages, action === 'stop' ? 'force-stop' : 'clear', forceNetwork);
+
   if (dryRun) {
     return text(`dry_run: ${action} для ${packages.length} пакет(ов):\n` +
       packages.map(p => `  ${p}`).join('\n') +
+      (guard.overridden.length
+        ? `\n\n⚠ force_network=true перекрывает сетевой гард для: ` +
+          guard.overridden.map(h => `${h.package} (${h.serving.join(', ')})`).join('; ')
+        : '') +
+      (guard.blind ? `\n\n⚠ ${guard.note}` : '') +
       `\n\nПовтори с dry_run=false, чтобы применить.`);
   }
+
   const done = [];
+  if (guard.overridden.length)
+    done.push(`⚠ force_network=true: сетевой гард перекрыт для ` +
+      guard.overridden.map(h => `${h.package} (${h.serving.join(', ')})`).join('; '));
+  if (guard.blind) done.push(`⚠ ${guard.note}`);
+
   for (const p of packages) {
     const cmd = action === 'stop' ? `am force-stop ${sq(p)}` : `pm clear ${sq(p)}`;
     const out = await adbSh(serial, `${cmd} 2>&1`);
@@ -352,7 +449,8 @@ async function actRemove(serial, args) {
   const dryRun = coerceBool(args.dry_run, true);
   const doCanary = coerceBool(args.canary, true);
   const doBackup = coerceBool(args.backup, mode === 'uninstall');
-  const force = coerceBool(args.force, false);
+  const force = coerceBool(args.force, false);               // только про провал бэкапа APK
+  const forceNetwork = coerceBool(args.force_network, false); // только про сетевой гард
   const batchSize = Math.max(1, Math.min(parseInt(args.batch_size, 10) || DEFAULT_BATCH, 25));
 
   const props = await getProps(serial);
@@ -362,6 +460,11 @@ async function actRemove(serial, args) {
   const unknown = packages.filter(p => !pkgs.all.includes(p));
   if (unknown.length)
     throw new Error(`Не установлены на устройстве: ${unknown.join(', ')}`);
+
+  // Сетевой гард — ДО protected-набора: его отказ называет порт и живого
+  // клиента, а не просто факт членства в списке. Снимок /proc/net берётся
+  // из protectedSet, второго чтения устройства не происходит.
+  const guard = await networkGuard(serial, packages, mode, forceNetwork, prot.net);
 
   const hit = packages.filter(p => prot.packages.includes(p));
   if (hit.length)
@@ -403,6 +506,7 @@ async function actRemove(serial, args) {
       protected_count: prot.packages.length,
       protected_sources: prot.sources,
       protected_notes: prot.notes,
+      network_guard: guardReport(guard),
       advisories,
       plan,
       hint: advisories.length
@@ -416,6 +520,7 @@ async function actRemove(serial, args) {
 
   const state = readState(args, serial);
   const report = { mode, applied: [], failed: [], stopped: false, canary: [] };
+  report.network_guard = guardReport(guard);
   if (advisories.length) report.advisories = advisories;
 
   for (let i = 0; i < packages.length; i += batchSize) {
@@ -615,7 +720,10 @@ async function adbApp(args) {
     case 'state':     return actState(serial, args);
     case 'protected': {
       const props = await getProps(serial);
-      const prot = await protectedSet(serial, { props });
+      // net — сырой снимок для гарда, в отчёт не идёт: то же самое уже
+      // разложено по sources.net_listener и sources.net_unattributed.
+      const { net, ...prot } = await protectedSet(serial, { props });
+      void net;
       return json({ device: props, ...prot });
     }
     default:

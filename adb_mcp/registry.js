@@ -125,14 +125,15 @@ const TOOLS = [
     description:
       'Package operations with guard rails: list/inspect apps, launch or stop them, disable (reversible) or uninstall them, back up their APKs and restore afterwards.\n' +
       'Safety model, do not work around it: every state-changing action defaults to dry_run=true; a protected set is DERIVED FROM THE DEVICE (current launcher, active IME, package installer, WebView provider, role holders where the OS has them, and account/registration packages) and any overlap aborts the whole call; work proceeds in batches with an account canary between them (a drop in the account count rolls the batch back and stops); everything applied is written to a snapshot on the HA filesystem so action=restore undoes it in one call.\n' +
-      'mode=uninstall additionally requires the addon option allow_uninstall and a successful APK backup. System packages removed with --user 0 are restored via install-existing; sideloaded ones can only come back from the backup, which is why it is mandatory.',
+      'mode=uninstall additionally requires the addon option allow_uninstall and a successful APK backup. System packages removed with --user 0 are restored via install-existing; sideloaded ones can only come back from the backup, which is why it is mandatory.\n' +
+      'A second, independent guard covers disable, uninstall, stop and clear: a package that is CURRENTLY SERVING an off-device client — it holds a listening TCP socket and has an inbound ESTABLISHED connection to that same port from a non-loopback peer — is refused, naming the port and the peer. That is a live dependency the account canary cannot see, because it only looks inside the device. Only force_network=true lifts this guard — a separate flag from force, which covers a failed APK backup and nothing else — and it does not lift the protected set.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: ['list', 'info', 'protected', 'launch', 'stop', 'clear', 'disable', 'uninstall', 'enable', 'restore', 'backup', 'state'],
-          description: 'list/info/protected/state are read-only. launch/stop/clear act immediately (clear defaults to dry_run). disable/uninstall/enable/restore/backup change state.'
+          description: 'list/info/protected/state are read-only. launch/stop/clear act immediately (clear defaults to dry_run); stop and clear are also subject to the network guard. disable/uninstall/enable/restore/backup change state.'
         },
         packages: { type: ['string', 'array'], items: { type: 'string' }, description: 'Package name or array of package names.' },
         serial: { type: 'string' },
@@ -144,7 +145,8 @@ const TOOLS = [
         batch_size: { type: 'number', description: 'Packages per batch between canary checks, default 5, max 25' },
         canary: { type: 'boolean', description: 'Check account count and launcher between batches, default true. Turning this off removes the only automatic protection against a latent breakage.' },
         backup: { type: 'boolean', description: 'Pull APKs before removing. Default true for uninstall, false for disable.' },
-        force: { type: 'boolean', description: 'Proceed even if the APK backup failed. Off by default.' },
+        force: { type: 'boolean', description: 'Proceed even if the APK backup failed. Off by default. This flag has nothing to do with the network guard — see force_network.' },
+        force_network: { type: 'boolean', description: 'Override the network guard: act on a package even though it is currently serving an off-device client. Applies to disable, uninstall, stop and clear. It does NOT override the derived protected set, and it does not cover a failed backup. Off by default.' },
         store: { type: 'string', description: 'Where snapshots and APK backups live on the HA side, must be under /media or /share. Default /media/adb-mcp' }
       },
       required: ['action']

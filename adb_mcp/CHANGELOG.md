@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.5
+The network signal stops being a report and becomes a refusal.
+
+**A package that is serving an off-device client right now is no longer disabled, uninstalled, force-stopped or cleared.** The criterion is read off the device and is deliberately narrow: the package holds a listening TCP socket *and* there is an inbound ESTABLISHED connection to that same local port from a non-loopback peer. The refusal names the port and the peer, and only an explicit `force_network: true` lifts it.
+
+Both halves are needed, and each rules out a specific false positive seen on the fleet. Listening alone is not enough — plenty of things listen speculatively, and refusing on that would make every torrent server and VPN client undisableable. An ESTABLISHED row alone is not enough either: with a high local port it is an *outbound* connection the app opened, and a video box has dozens of those at any moment. A remote loopback address does not count, because v2rayNG's inbound connections on 10808 come from the same device and are not an external dependency. What remains — someone else's address connected to a port the package is listening on — is direct evidence that something outside the device depends on this package at this moment.
+
+**Why this rather than a package name in the core list.** The case that prompted it is `com.google.android.tv.remote.service` on an Android 11 Shield, which holds 6466/6467 and talks to Home Assistant through the `androidtv_remote` integration. Adding that name to `CORE_PROTECTED` would protect exactly the flat it was written in: the repository is public, and on someone else's box the integration channel is held by a different package, which the add-on would then remove with a clear conscience. A signal taken from the device works on hardware nobody here has ever seen.
+
+**`stop` and `clear` had no protection at all, and that was the real hole.** The protected set is consulted only by `disable` and `uninstall`; `action=stop` went straight to `am force-stop`, and its default was `dry_run: false`, so a single call with no extra parameters would silently cut a live service. `pm clear` is worse than stop rather than milder — it stops the app *and* wipes its data, which on a remote service means the pairing. Both are now behind the guard, `clear` included: the specification named force-stop, and covering only that would have left the more destructive of the two open.
+
+**Sockets on a shared uid are refused, not skipped.** A uid spread across several packages cannot be attributed to any one of them — that is what `net_unattributed` has recorded since 1.2.3. When such a uid is serving an external client and the target package belongs to it, the guard refuses and says plainly that the link is unproven. Passing over it quietly was the option that felt tidier and is exactly the gap being closed: it cannot be shown that this package holds the socket, and it equally cannot be shown that it does not, while the two mistakes cost very different amounts. The refusal is lifted by the same `force_network`, and it fires only when there is a live external connection, never on a merely listening shared uid.
+
+**`force_network` is its own flag, separate from `force`.** `force` exists to continue after a failed APK backup, so it is set while thinking about backups — and one flag covering both would have meant that deciding about a backup silently decided about cutting a live service too. Two unrelated risks, two deliberate answers.
+
+**The guard is checked before the protected set, and `force_network` does not reach past it.** Its refusal names the port and the live peer, which is far more useful than the membership-in-a-list message the protected set produces. If `force_network` is passed, a system package still stops at the protected set, which has no override — it only downgrades one refusal into the other. For the record: system packages holding a listening socket have been in the protected set since 1.1.2, so `disable` on the Shield remote service already refused; the guard adds the specific message, the two actions that had no cover, and the user-package and shared-uid cases.
+
+**Documentation moved into the add-on directory.** Home Assistant reads `CHANGELOG.md` and `DOCS.md` from the add-on folder, not from the repository root, so neither the changelog nor any documentation was reachable from the add-on's own tabs. `CHANGELOG.md` now lives in `adb_mcp/` (moved, not copied — a second copy at the root would drift), and a new `adb_mcp/DOCS.md` covers configuration, the tools and the safety model. `README.md` stays at the repository root, where GitHub looks for it.
+
+**A guard that could not read the device says so.** If `/proc/net` cannot be read, the state-changing call still reports `network_guard: СЛЕП` in its output instead of proceeding as if the check had passed. Verified readable from the shell on SDK 28, 30 and 31; the Android 10+ restrictions do not apply to uid 2000.
+
 ## 1.2.4
 One fix, found while accepting 1.2.3 on hardware.
 

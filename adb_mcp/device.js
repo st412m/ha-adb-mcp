@@ -17,6 +17,13 @@
  * Отсюда правило модуля: КАЖДЫЙ несработавший источник обязан оставить запись
  * в notes. Отсутствие роли и провал опроса роли — разные строки.
  *
+ * ── 1.2.5 ──────────────────────────────────────────────────────────────────
+ * Сетевой признак перестал быть только отчётом. `servingHits()` отвечает на
+ * вопрос «обслуживает ли пакет клиента вне устройства ПРЯМО СЕЙЧАС», и
+ * apps.js делает по нему отказ на разрушающих действиях. Сам сбор сигнала не
+ * менялся — добавлены `byUid` и `ok` в возврат `netListeners()`, чтобы гард
+ * мог разобрать случай общего uid и отличить провал опроса от пустого ответа.
+ *
  * ── Что исправлено в 1.1.1 по итогам приёмки на живых устройствах ──────────
  *
  * 1. РОЛИ. `cmd role get-role-holders` НЕ СУЩЕСТВУЕТ ни на SDK 30, ни на 31:
@@ -352,12 +359,14 @@ async function netListeners(serial) {
       tcp: 'cat /proc/net/tcp /proc/net/tcp6',
     }));
   } catch (e) {
-    return { byPackage: {}, note: `⚠ слушающие сокеты не опрошены (${e.message}) — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
+    return { ok: false, byPackage: {}, byUid: {}, unattributed: [],
+      note: `⚠ слушающие сокеты не опрошены (${e.message}) — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
   }
 
   const m = splitMarked(out);
   if (!String(m.tcp || '').trim())
-    return { byPackage: {}, note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
+    return { ok: false, byPackage: {}, byUid: {}, unattributed: [],
+      note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
 
   const byUid = {};
   for (const line of String(m.uidmap || '').split('\n')) {
@@ -434,7 +443,110 @@ async function netListeners(serial) {
       `(общий sharedUserId или демон вне пакетной модели) — эти сокеты в защите НЕ УЧТЕНЫ, см. net_unattributed`
     : null;
 
-  return { byPackage, unattributed, note };
+  return { ok: true, byPackage, byUid, unattributed, note };
+}
+
+/**
+ * Кто из перечисленных пакетов ПРЯМО СЕЙЧАС обслуживает клиента вне
+ * устройства. Чистая функция: работает по готовому снимку netListeners,
+ * к устройству не ходит.
+ *
+ * Критерий ровно один и он двойной: пакет держит LISTEN И на тот же
+ * локальный порт есть ESTABLISHED с НЕ-loopback удалённого адреса.
+ * Оба условия нужны, и вот почему каждое:
+ *
+ *  · Один LISTEN — не повод. Слушают многие и на всякий случай; отказывать
+ *    по нему значит сделать неотключаемым любой торрент-клиент и VPN.
+ *  · ESTABLISHED сам по себе тоже не повод: строка с ВЫСОКИМ локальным
+ *    портом — это ИСХОДЯЩЕЕ соединение приложения, их у любого плеера
+ *    десятки. Значит только входящее НА слушающий порт.
+ *  · Удалённый loopback не считается: у v2rayNG входящие на 10808 идут
+ *    с самого устройства, внешней зависимости в этом нет.
+ *
+ * Соединение с чужого адреса — единственное прямое доказательство, что
+ * от пакета что-то зависит СНАРУЖИ. Именно этот класс отказа канарейка
+ * не ловит принципиально: она смотрит внутрь устройства (аккаунты,
+ * лаунчер), а пульт Google TV мёртв ровно снаружи.
+ *
+ * ⚠ Сокеты общего uid (net_unattributed). Приписать такой сокет пакету
+ * нельзя — но и промолчать нельзя, тихий проход здесь и есть та дыра,
+ * которую гард закрывает. Поэтому: если uid, делимый несколькими
+ * пакетами, обслуживает внешнего клиента, а целевой пакет входит в этот
+ * uid — это попадание с пометкой attributed: false. Доказать, что сокет
+ * держит НЕ он, нечем, а цена ошибки несимметрична. Отказ снимается
+ * тем же force_network, что и обычный, и текст прямо говорит, что это
+ * недоказанный случай, а не установленный факт.
+ */
+function servingHits(net, packages) {
+  const want = new Set((packages || []).filter(Boolean));
+  const hits = [];
+  if (!net || !want.size) return hits;
+
+  for (const [pkg, info] of Object.entries(net.byPackage || {})) {
+    if (!want.has(pkg)) continue;
+    const serving = (info && info.serving) || [];
+    if (!serving.length) continue;
+    hits.push({
+      package: pkg,
+      attributed: true,
+      ports: (info.ports || []).slice(),
+      serving: serving.slice(),
+    });
+  }
+
+  const byUid = net.byUid || {};
+  for (const u of (net.unattributed || [])) {
+    if (!u.serving || !u.serving.length) continue;
+    for (const pkg of (byUid[u.uid] || [])) {
+      if (!want.has(pkg)) continue;
+      if (hits.some(h => h.package === pkg)) continue;
+      hits.push({
+        package: pkg,
+        attributed: false,
+        uid: u.uid,
+        owners: (byUid[u.uid] || []).length,
+        ports: (u.ports || []).slice(),
+        serving: u.serving.slice(),
+      });
+    }
+  }
+
+  return hits.sort((a, b) => a.package.localeCompare(b.package));
+}
+
+/** Русская форма числительного: 1 пакет, 2 пакета, 5 пакетов. */
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return `${n} ${many}`;
+  if (b > 1 && b < 5) return `${n} ${few}`;
+  if (b === 1) return `${n} ${one}`;
+  return `${n} ${many}`;
+}
+
+/** Текст отказа сетевого гарда. Отдельной функцией — он одинаков для
+ *  disable / uninstall / stop / clear, а расходиться такие тексты умеют. */
+function servingRefusal(hits, what) {
+  const lines = hits.map(h => h.attributed
+    ? `  · ${h.package} — слушает ${h.ports.length > 1 ? 'порты' : 'порт'} ${h.ports.join(', ')}, ` +
+      `прямо сейчас обслуживает ${h.serving.join(', ')}`
+    : `  · ${h.package} — uid ${h.uid} слушает ${h.ports.join(', ')} и прямо сейчас обслуживает ` +
+      `${h.serving.join(', ')}. Этот uid делят ${plural(h.owners, 'пакет', 'пакета', 'пакетов')}, ` +
+      `какой из них держит сокет — ` +
+      `из /proc/net не видно. Что это НЕ ${h.package}, доказать нечем`);
+
+  const unproven = hits.some(h => !h.attributed);
+
+  return `ОТКАЗ (${what}): пакет прямо сейчас обслуживает клиента вне устройства.\n` +
+    lines.join('\n') + '\n' +
+    'Это не «слушает на всякий случай», а живое входящее соединение с чужого адреса: ' +
+    'что-то снаружи от пакета зависит именно сейчас. Такой отказ канарейка не поймает — ' +
+    'она смотрит внутрь устройства (аккаунты, лаунчер), а сломанным окажется то, что видно только снаружи.\n' +
+    (unproven
+      ? 'Часть попаданий НЕДОКАЗАНА: сокет принадлежит общему uid, и связь с конкретным пакетом ' +
+        'установить нельзя — отказ здесь по принципу «не доказано, что можно».\n'
+      : '') +
+    'Ничего не выполнено (целиком, а не частично). Если это осознанно — повтори с force_network: true. ' +
+    '(Это отдельный флаг: `force` относится только к провалу бэкапа APK и гард не снимает.)';
 }
 
 /**
@@ -571,6 +683,11 @@ async function protectedSet(serial, opts = {}) {
   // Без этой границы сетевой признак сделал бы неотключаемыми любой
   // торрент-сервер или VPN-клиент, а аутентификаторный — файловые
   // менеджеры вроде X-plore, которые тоже регистрируют аутентификатор.
+  //
+  // ⚠ 1.2.5: у пользовательского пакета осталось предупреждение, но поверх
+  // него встал отдельный ярус — сетевой гард в apps.js. Он не про «можно ли
+  // потерять пакет», а про «прервётся ли прямо сейчас чья-то живая работа»,
+  // и потому применяется независимо от системности.
   const advisories = [];
   const net = await netListeners(serial);
   if (net.note) notes.push(net.note);
@@ -622,12 +739,16 @@ async function protectedSet(serial, opts = {}) {
     sources,
     advisories,
     notes,
+    // Сырой снимок сетевого признака — для гарда в apps.js, чтобы не
+    // читать /proc/net второй раз в том же вызове. В выдачу action=protected
+    // не идёт: sources.net_listener и net_unattributed уже показывают то же.
+    net,
   };
 }
 
 module.exports = {
   CORE_PROTECTED, CORE_PREFIXES, ACCOUNT_HINTS, PKG_RE, LOCALE_RE,
   getProps, listPackages, accountSnapshot, protectedSet, roleHolders,
-  netListeners, authProviders, decodeAddr, isLoopback,
+  netListeners, servingHits, servingRefusal, authProviders, decodeAddr, isLoopback,
   pkgOf, looksLikePackage, splitMarked, markedCommand,
 };
