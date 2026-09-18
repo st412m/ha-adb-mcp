@@ -42,33 +42,44 @@ const TOOLS = [
   },
   {
     name: 'adb_screenshot',
-    description: 'Take a screenshot of the device screen. Returns a JPEG image so Claude can see the UI. Downscaled to max_px (default 1024) at JPEG quality (default 70); raise them only when fine detail matters.',
+    description: 'Take a screenshot of the device screen. Returns a JPEG image so Claude can see the UI, followed by a text line with the screen size, the image size and the scale between them, e.g. "screen 1080x2340 -> image 473x1024 · scale 2.283/2.285" — pass coords="screenshot" to adb_tap/adb_swipe to tap using coordinates read off THIS image directly. Downscaled to max_px (default 1024) at JPEG quality (default 70); raise them only when fine detail matters. A near-uniformly dark frame is reported as a warning after the image, not refused — it can be a genuinely dark scene, a sleeping screen or FLAG_SECURE content, and the warning says which evidence (if any) could be read off the device.',
     inputSchema: { type: 'object', properties: { serial: { type: 'string' }, quality: { type: 'number', description: 'JPEG quality 30-95, default 70' }, max_px: { type: 'number', description: 'Max dimension 320-1920, default 1024' } } }
   },
   {
     name: 'adb_ui_dump',
-    description: 'Dump the current UI hierarchy (uiautomator) as a compact list of interactive/labeled elements with tap coordinates @(x,y). Use together with adb_tap.',
+    description: 'Dump the current UI hierarchy (uiautomator) as a compact list of interactive/labeled elements with tap coordinates @(x,y). Password fields are marked [PASSWORD] and listed even with no visible text. Use together with adb_tap.',
     inputSchema: { type: 'object', properties: { serial: { type: 'string' } } }
   },
   {
     name: 'adb_tap',
-    description: 'Tap at screen coordinates (x, y). Get coordinates from adb_ui_dump or adb_screenshot.',
-    inputSchema: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, serial: { type: 'string' } }, required: ['x', 'y'] }
+    description: 'Tap at coordinates (x, y). coords="screen" (default) means coordinates from adb_ui_dump — the LOGICAL screen size (wm size Override if the device has one, otherwise Physical), which is the same space input tap itself uses. coords="screenshot" means coordinates read directly off the last adb_screenshot image for the SAME serial (pass serial the same way in both calls) — they are rescaled automatically to that same logical space, but only within 120s of that screenshot; older or missing screenshots are refused rather than guessed. On some TV boxes (seen on Shield and Fire TV) the screenshot frame is captured at a higher physical resolution than the logical one input tap/uiautomator operate in — this is accounted for automatically, you never need to think about it. Rotation between the screenshot and the tap is not checked. verify="activity"|"ui" checks whether the tap actually changed anything (resumed activity, and optionally a UI dump hash) — off by default, since it adds latency; "ui" costs two-three extra UI dumps (~2-4s). A verify failure never turns a performed tap into an error.',
+    inputSchema: { type: 'object', properties: {
+      x: { type: 'number' }, y: { type: 'number' }, serial: { type: 'string' },
+      coords: { type: 'string', enum: ['screen', 'screenshot'], description: 'Coordinate space, default "screen". "screenshot" = pixels read off the last adb_screenshot image for this serial, rescaled automatically; refused if that screenshot is missing or older than 120s.' },
+      verify: { type: 'string', enum: ['none', 'activity', 'ui'], description: 'Default "none". "activity": compares the resumed activity before/after. "ui": also hashes the UI dump before/after (adds ~2-4s); a live element outside com.android.systemui — a player\'s elapsed-time counter, a launcher clock, an auto-rotating carousel — can produce a false "changed" (confirmed live: a YouTube timer ticking over alone triggered it, with no actual action taken). "unchanged" stays reliable regardless.' },
+    }, required: ['x', 'y'] }
   },
   {
     name: 'adb_swipe',
-    description: 'Swipe from (x1,y1) to (x2,y2) over duration_ms (default 300).',
-    inputSchema: { type: 'object', properties: { x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, duration_ms: { type: 'number' }, serial: { type: 'string' } }, required: ['x1', 'y1', 'x2', 'y2'] }
+    description: 'Swipe from (x1,y1) to (x2,y2) over duration_ms (default 300). The same point on both ends with duration_ms >= 800 is a long-press. coords and verify work the same as in adb_tap (both endpoints share the same coordinate space); with verify="ui", an "unchanged" result on a swipe usually means the end of a scrollable list.',
+    inputSchema: { type: 'object', properties: {
+      x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, duration_ms: { type: 'number' }, serial: { type: 'string' },
+      coords: { type: 'string', enum: ['screen', 'screenshot'], description: 'Coordinate space for BOTH endpoints, default "screen". See adb_tap for the "screenshot" semantics and its 120s TTL.' },
+      verify: { type: 'string', enum: ['none', 'activity', 'ui'], description: 'See adb_tap. For a swipe, "ui" reporting "unchanged" usually means you hit the end of a scrollable list rather than that nothing happened.' },
+    }, required: ['x1', 'y1', 'x2', 'y2'] }
   },
   {
     name: 'adb_text',
-    description: 'Type text into the focused input field. ASCII goes through input text; non-ASCII (cyrillic, emoji, CJK) is sent via the ADBKeyBoard IME (must be installed on the device: github.com/senzhk/ADBKeyBoard) — the current keyboard is temporarily switched and restored afterwards.',
+    description: 'Type text into the focused input field. ASCII goes through input text; non-ASCII (cyrillic, emoji, CJK) is sent via the ADBKeyBoard IME (must be installed on the device: github.com/senzhk/ADBKeyBoard) — the current keyboard is temporarily switched and restored afterwards. The response reports only the character count, never the text itself.',
     inputSchema: { type: 'object', properties: { text: { type: 'string' }, serial: { type: 'string' } }, required: ['text'] }
   },
   {
     name: 'adb_key',
-    description: 'Send a keyevent. Accepts names (HOME, BACK, ENTER, DPAD_UP, POWER, VOLUME_UP, MENU, TAB...) or numeric codes.',
-    inputSchema: { type: 'object', properties: { key: { type: 'string' }, serial: { type: 'string' } }, required: ['key'] }
+    description: 'Send a keyevent. Accepts names (HOME, BACK, ENTER, DPAD_UP, POWER, VOLUME_UP, MENU, TAB...) or numeric codes. verify="activity"|"ui" checks whether the key actually changed anything — see adb_tap for the same parameter.',
+    inputSchema: { type: 'object', properties: {
+      key: { type: 'string' }, serial: { type: 'string' },
+      verify: { type: 'string', enum: ['none', 'activity', 'ui'], description: 'Default "none". See adb_tap.' },
+    }, required: ['key'] }
   },
   {
     name: 'adb_find_and_tap',
@@ -126,7 +137,8 @@ const TOOLS = [
       'Package operations with guard rails: list/inspect apps, launch or stop them, disable (reversible) or uninstall them, back up their APKs and restore afterwards.\n' +
       'Safety model, do not work around it: every state-changing action defaults to dry_run=true; a protected set is DERIVED FROM THE DEVICE (current launcher, active IME, package installer, WebView provider, role holders where the OS has them, and account/registration packages) and any overlap aborts the whole call; work proceeds in batches with an account canary between them (a drop in the account count rolls the batch back and stops); everything applied is written to a snapshot on the HA filesystem so action=restore undoes it in one call.\n' +
       'mode=uninstall additionally requires the addon option allow_uninstall and a successful APK backup. System packages removed with --user 0 are restored via install-existing; sideloaded ones can only come back from the backup, which is why it is mandatory.\n' +
-      'A second, independent guard covers disable, uninstall, stop and clear: a package that is CURRENTLY SERVING an off-device client — it holds a listening TCP socket and has an inbound ESTABLISHED connection to that same port from a non-loopback peer — is refused, naming the port and the peer. That is a live dependency the account canary cannot see, because it only looks inside the device. Only force_network=true lifts this guard — a separate flag from force, which covers a failed APK backup and nothing else — and it does not lift the protected set.',
+      'A second, independent guard covers disable, uninstall, stop and clear: a package that is CURRENTLY SERVING an off-device client — it holds a listening TCP socket and has an inbound ESTABLISHED connection to that same port from a non-loopback peer — is refused, naming the port and the peer. That is a live dependency the account canary cannot see, because it only looks inside the device. Only force_network=true lifts this guard — a separate flag from force, which covers a failed APK backup and nothing else — and it does not lift the protected set.\n' +
+      'action=launch also accepts an intent/deep-link form: give uri and/or intent_action (with optional extras) instead of relying on the package\'s main activity. packages is then optional and, if given a single value, narrows the resolver via -p (more than one is a refusal). intent_action=android.intent.action.CALL/CALL_PRIVILEGED/CALL_EMERGENCY is refused while the addon option allow_shell is false, regardless of whether the call would actually succeed — a disabled adb_shell should not become a silent way to place a call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -135,7 +147,10 @@ const TOOLS = [
           enum: ['list', 'info', 'protected', 'launch', 'stop', 'clear', 'disable', 'uninstall', 'enable', 'restore', 'backup', 'state'],
           description: 'list/info/protected/state are read-only. launch/stop/clear act immediately (clear defaults to dry_run); stop and clear are also subject to the network guard. disable/uninstall/enable/restore/backup change state.'
         },
-        packages: { type: ['string', 'array'], items: { type: 'string' }, description: 'Package name or array of package names.' },
+        packages: { type: ['string', 'array'], items: { type: 'string' }, description: 'Package name or array of package names. For action=launch with uri/intent_action, at most one package is accepted (used as -p to narrow the resolver); it is otherwise optional there.' },
+        uri: { type: 'string', description: 'action=launch only: deep-link / intent data URI (am start -d). Its presence, together with intent_action, selects the intent-based launch instead of resolving the package\'s main activity.' },
+        intent_action: { type: 'string', description: 'action=launch only: intent action, default android.intent.action.VIEW when uri is set. Must match [A-Za-z0-9_.]+. See the CALL refusal note above.' },
+        extras: { type: ['object', 'string'], description: 'action=launch only: intent extras. string -> --es, boolean -> --ez, integer fitting int32 -> --ei, larger integer -> --el, anything else is a refusal naming the key. Also accepts a JSON-stringified object (same MCP-client quirk as array parameters).' },
         serial: { type: 'string' },
         filter: { type: 'string', enum: ['user', 'system', 'disabled', 'all'], description: 'action=list only, default user' },
         q: { type: 'string', description: 'action=list only: case-insensitive substring filter' },

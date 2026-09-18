@@ -25,11 +25,11 @@ Rule of thumb: if what you want is an entity, use the official integration. If w
 | `adb_disconnect` | Disconnect one device | Other transports untouched |
 | `adb_pair` | Pair Android 11+ (Wireless Debugging) | Needs `ip:port` **and 6-digit code from the pairing dialog** (both random; dialog must stay open) |
 | `adb_shell` | Run any shell command | Disabled entirely when `allow_shell: false` |
-| `adb_screenshot` | JPEG screenshot | Default 1024px / quality 70; optional `max_px` (320–1920), `quality` (30–95) when fine detail matters |
-| `adb_ui_dump` | Compact UI hierarchy with tap coordinates | Auto-retries once (600 ms) if uiautomator returns a stale cached dump |
+| `adb_screenshot` | JPEG screenshot | Default 1024px / quality 70; optional `max_px` (320–1920), `quality` (30–95). Followed by a text line with screen/image size and scale — see below. A near-uniformly dark frame is a warning after the image, not a refusal |
+| `adb_ui_dump` | Compact UI hierarchy with tap coordinates | Auto-retries once (600 ms) if uiautomator returns a stale cached dump. Password fields are marked `[PASSWORD]` and listed even with no visible text |
 | `adb_find_and_tap` | Find an element by label and activate it | Picks tap vs DPAD walk **from the device's own features**; refuses instead of guessing — see below |
-| `adb_tap` / `adb_swipe` / `adb_key` | Input control | Key names or keycodes (`HOME`, `BACK`, `WAKEUP`, …) |
-| `adb_text` | Type into focused field | ASCII via `input text`; **non-ASCII (Cyrillic/emoji/CJK) via ADBKeyBoard** — see below |
+| `adb_tap` / `adb_swipe` / `adb_key` | Input control | Key names or keycodes (`HOME`, `BACK`, `WAKEUP`, …). `coords="screenshot"` on tap/swipe reuses the last screenshot's coordinates (120s TTL) — see below. `verify="activity"\|"ui"` checks whether the action changed anything — see below |
+| `adb_text` | Type into focused field | ASCII via `input text`; **non-ASCII (Cyrillic/emoji/CJK) via ADBKeyBoard** — see below. The response reports a character count, never the text itself |
 | `adb_install` | Install APK(s) from `/media` or `/share` | One path → `adb install`. Array of paths → `adb install-multiple`. **One `.apks`/`.xapk`/`.apkm` bundle → splits chosen from the device and installed** — see below. Flags `-r -t -g` |
 | `adb_uninstall` | Uninstall by package name | `keep_data` optional. For system packages, bulk work and backups use `adb_app` |
 | `adb_app` | Package operations with guard rails | list/info/launch/stop/clear/disable/uninstall/enable/restore/backup/state — see below |
@@ -64,6 +64,73 @@ adb_install apk_path="/media/apk/X-plore.apks" locales=["ru"]
 ```
 
 Arrays of individual split paths still work exactly as before. To restore an app after a factory reset, `pm path <pkg>` on a working device lists the exact split set — `adb_pull` those and pass them back as an array.
+
+### Screenshot coordinates, and a dark frame
+
+`adb_screenshot`'s image is downscaled to `max_px`, so coordinates read off
+that picture directly would generally miss. The tool follows the image
+with the actual scale, computed against the *logical* screen size (the one
+`input tap`/`adb_ui_dump` use — `wm size`'s `Override size:` when the
+device reports one, else `Physical size:`), not the raw pixel size of the
+captured frame:
+
+```
+screen 1920x1080 (кадр 3840x2160) → image 1024x576 · scale 1.875/1.875 · для adb_tap/adb_swipe передай coords="screenshot"
+```
+
+The `(кадр ...)` part only appears when the captured frame's actual size
+differs from the logical one — confirmed on the fleet to depend on the
+device, not a fixed rule: an Nvidia Shield captures at double its logical
+size and shows the note, while a Fire TV with the *identical* `wm size`
+output already captures at the logical size and shows no note; a TiVo
+Stream 4K, a Galaxy S22 and a Galaxy Watch 6 have no `Override size:` at
+all and show no note either. The watch (480×480) is the one device on the
+fleet smaller than `max_px`: since `-resize`'s `>` flag never enlarges an
+image, its response is a plain `scale 1.000/1.000` — no shrink, no
+stretch. Rotation is judged from the captured frame itself.
+
+Pass `coords="screenshot"` to `adb_tap`/`adb_swipe` to tap using coordinates
+read straight off that image — rescaled automatically, but only within 120s
+of the screenshot and only when `serial` matches between the two calls; an
+older or missing screenshot is refused rather than guessed at. Rotation
+*between* the screenshot and the tap call is not checked — only the
+orientation *within* one screenshot is reconciled. `coords="screen"`
+(default) is the unchanged 1.2.5 behaviour — real screen pixels, from
+`adb_ui_dump`.
+
+A screenshot that comes back almost completely dark (low mean brightness
+and low variance) is a **warning after the image, not a refusal** — a real
+dark scene or a screensaver is legitimate, and refusing would remove the
+picture exactly where it's needed. When it fires, the tool best-effort
+attaches `dumpsys power`'s wakefulness state and a `FLAG_SECURE` check on
+the focused window; either piece is optional and shows as "not determined"
+rather than a guess when it can't be read cleanly.
+
+### `verify` on `adb_tap` / `adb_swipe` / `adb_key`
+
+`verify="activity"` compares the resumed activity before/after the action;
+`verify="ui"` additionally hashes the UI dump before/after (`com.android.systemui`
+nodes excluded, so the status bar itself never counts as a change) — both
+default to off. `"ui"` costs two to three extra UI dumps (~2–4s), which is
+why. A verify failure never turns a performed action into an error — the
+action already happened — it just reports the check as undetermined.
+**Known false positive, confirmed live, not just theoretical:** a live
+element *outside* systemui — a launcher's own clock, a video player's
+elapsed-time counter, an auto-rotating carousel, a watch face's time — is
+not excluded by the systemui filter and can make `"ui"` report "changed"
+with no real action taken; a YouTube timer alone did exactly this in
+testing, and it turns up across unrelated device classes: TV launchers,
+Fire TV's carousel, and a Galaxy Watch 6 watch face. "unchanged" stays
+reliable either way, and for `adb_swipe` it's annotated as usually meaning
+the end of a scrollable list.
+
+A `uiautomator` failure never turns a completed action into an error
+either — confirmed live on a Galaxy Watch 6 with its screen off, where
+`uiautomator` errored with "null root node returned by
+UiTestAutomationBridge": the tap and the `resumed` check both still
+succeeded, only `ui` came back "не определено". With the watch's screen
+on, both a plain dump and `verify="ui"` worked normally — the failure
+tracks the screen being off, not Wear OS as such.
 
 ### `adb_find_and_tap`
 
@@ -115,6 +182,8 @@ The safety model, in order of how often it saves you:
 - **`mode=uninstall` sits behind three locks:** the `allow_uninstall` add-on option (off by default), an explicit `mode` in the call, and a successful APK backup. System packages removed with `--user 0` come back via `cmd package install-existing`; a sideloaded one can only come back from the backup, which is why it is mandatory. `force: true` overrides a *failed backup* and nothing else — it is deliberately not the same flag as `force_network`, so that deciding about a backup cannot silently decide about a live service too.
 
 `action=backup` pulls a package's APKs (all splits) plus a `manifest.json` recording version, ABI and the split list — useful on its own, before a factory reset.
+
+`action=launch` also accepts an intent/deep-link form: `uri` and/or `intent_action` (default `android.intent.action.VIEW` once `uri` is set), with `extras` mapping `string→--es`, `boolean→--ez`, an int32-sized integer→`--ei`, a larger integer→`--el`. `packages` is then optional and, with a single value, narrows the resolver via `-p` (more than one is a refusal). `intent_action=android.intent.action.CALL` / `CALL_PRIVILEGED` / `CALL_EMERGENCY` is refused while `allow_shell: false` — independent of whether the call would actually succeed — so a disabled `adb_shell` can't become a quiet side door back to dialing; `allow_shell: true` does not refuse this, since `adb_shell` could dial anyway.
 
 ### `adb_logcat` filter semantics
 
@@ -252,6 +321,7 @@ Seen on certified Android TV devices with Play Services. Devices without Play Pr
 - `adb_push`/`adb_pull`/`adb_install` are restricted to `/media` and `/share` on the HA side.
 - `adb_app` writes APK backups and its rollback snapshot under `store` (default `/media/adb-mcp`) — those APKs are readable by anything else with access to `/media`.
 - **Never expose port 5037 beyond your LAN** — the adb server has no auth at all.
+- With `log_requests: true`, `adb_text` input and `adb_pair` codes are masked in the log and in error text — but `adb_shell.command` is not, since it's an arbitrary admin command with no fixed shape to mask. Type secrets through `adb_text`, not through `input text` run via `adb_shell`.
 
 ## License
 

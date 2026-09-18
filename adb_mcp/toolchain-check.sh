@@ -116,12 +116,54 @@ smoke() {
   fi
 }
 
+# 1.3.0 (§2 спеки, ревизия 17.09): геометрия и mean/sd скриншота гоняются
+# через ФУНКЦИИ /ui.js (buildImagePipeline, parseGeometry) — не через свою
+# копию команды IM. Копия проверяла бы дубликат, а не код adb_screenshot.
+# xc:black должен разобраться как тёмный кадр 1080x2340 -> 473x1024,
+# gradient: — как обычный (не тёмный).
+geometry_check() {
+  T2=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$T'; rm -rf '$T2'" EXIT
+
+  "$IM" -size 1080x2340 xc:black "$T2/black.png"
+  "$IM" -size 1080x2340 gradient: "$T2/grad.png"
+
+  for name in black grad; do
+    CMD=$(node -e "
+      const ui = require('/ui.js');
+      process.stdout.write(ui.buildImagePipeline('$T2/$name.png', '$T2/$name.jpg', 1024, 70));
+    ") || { echo "SMOKE FAIL: buildImagePipeline не отработал в node ($name)" >&2; exit 1; }
+    IM="$IM" sh -c "$CMD" 2>"$T2/$name.geom" \
+      || { echo "SMOKE FAIL: screenshot-geometry pipeline ($name, im=$IM) exit $?" >&2; cat "$T2/$name.geom" >&2; exit 1; }
+  done
+
+  node -e "
+    const fs = require('fs');
+    const ui = require('/ui.js');
+    const black = ui.parseGeometry(fs.readFileSync('$T2/black.geom', 'utf8'));
+    const grad = ui.parseGeometry(fs.readFileSync('$T2/grad.geom', 'utf8'));
+    if (!(black.W === 1080 && black.H === 2340 && black.w === 473 && black.h === 1024)) {
+      console.error('SMOKE FAIL: geometry mismatch for xc:black: ' + JSON.stringify(black)); process.exit(1);
+    }
+    if (black.dark !== true) {
+      console.error('SMOKE FAIL: xc:black not detected as dark: ' + JSON.stringify(black)); process.exit(1);
+    }
+    if (grad.dark !== false) {
+      console.error('SMOKE FAIL: gradient: falsely detected as dark: ' + JSON.stringify(grad)); process.exit(1);
+    }
+  " || exit 1
+
+  GEOM_STATUS=ok
+}
+
 collect
 case "${1:-runtime}" in
   build)
     guard
     modules_guard
     smoke
+    geometry_check
     {
       echo "built: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
       echo "nodejs: $NODE_V"
@@ -131,6 +173,7 @@ case "${1:-runtime}" in
       echo "screenshot-pipeline(file->file): ok"
       echo "imagemagick-stream(stdin=file): $STREAM"
       echo "imagemagick-stream(stdin=pipe): $PIPED"
+      echo "screenshot-geometry: $GEOM_STATUS"
     } > "$MANIFEST"
     echo "Toolchain OK -> $(tr '\n' '; ' < "$MANIFEST")"
     ;;

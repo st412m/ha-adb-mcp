@@ -6,3 +6,8 @@ venv/
 .env
 *.log
 .DS_Store
+
+# local working notes: specs, prompts, acceptance scratch
+*-spec.md
+PROMPT-*.md
+.claude-scratch/

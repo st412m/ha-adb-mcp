@@ -39,14 +39,18 @@ const fs = require('fs');
 const path = require('path');
 const {
   adb, adbSh, withSerial, sq, text, json,
-  coerceArray, coerceBool, resolveSafeHostPath, ensureDir, sanitizeSerial,
+  coerceArray, coerceBool, coerceObject, resolveSafeHostPath, ensureDir, sanitizeSerial,
 } = require('./adb.js');
 const {
   getProps, listPackages, accountSnapshot, protectedSet,
-  netListeners, servingHits, servingRefusal,
+  netListeners, servingHits, servingRefusal, resumedActivity,
 } = require('./device.js');
 
 const ALLOW_UNINSTALL = process.env.ALLOW_UNINSTALL === 'true';
+// 1.3.0 (§4 спеки): нужен для отказа на CALL/CALL_PRIVILEGED/CALL_EMERGENCY
+// при выключенном shell. Дублирует вычисление из session.js/server.js — тот
+// же приём, что уже используется для ALLOW_UNINSTALL в этом файле.
+const ALLOW_SHELL = process.env.ALLOW_SHELL !== 'false';
 const DEFAULT_STORE = '/media/adb-mcp';
 const DEFAULT_BATCH = 5;
 
@@ -301,8 +305,171 @@ async function actInfo(serial, args) {
   return json(out);
 }
 
+// Токен am/intent: то же ограничение, что уже используется для extras-ключей
+// и для action — никаких произвольных флагов `am` снаружи вызова.
+const AM_TOKEN_RE = /^[A-Za-z0-9_.]+$/;
+
+// §4 спеки, ревизия 17.09: выключенный shell не должен молча вернуть
+// способность звонить через intent-запуск. Так ли это реально сработает —
+// источники расходятся (есть примеры и успеха, и SecurityException), но
+// проверка = настоящий звонок, поэтому НЕ проверяется на железе; отказ стоит
+// независимо от ответа на этот вопрос физики. При allow_shell=true отказа
+// нет — adb_shell и так умеет звонить.
+const CALL_ACTIONS = new Set([
+  'android.intent.action.CALL',
+  'android.intent.action.CALL_PRIVILEGED',
+  'android.intent.action.CALL_EMERGENCY',
+]);
+
+/**
+ * extras → флаги `am start`: string → --es, boolean → --ez, целое в int32 →
+ * --ei, более крупное целое → --el, всё прочее — отказ с именем ключа.
+ * Принимает и JSON-строку объекта: клиент claude.ai сериализует объекты
+ * так же, как массивы (урок 0.5.1, coerceArray) — отсюда coerceObject.
+ */
+function extrasToAmFlags(extras) {
+  const obj = coerceObject(extras);
+  const flags = [];
+  for (const [k, v] of Object.entries(obj)) {
+    if (!AM_TOKEN_RE.test(k)) throw new Error(`extras.${k}: имя ключа должно быть [A-Za-z0-9_.]+`);
+    if (typeof v === 'boolean') flags.push('--ez', sq(k), sq(String(v)));
+    else if (typeof v === 'string') flags.push('--es', sq(k), sq(v));
+    else if (typeof v === 'number' && Number.isInteger(v)) {
+      const isInt32 = v >= -2147483648 && v <= 2147483647;
+      flags.push(isInt32 ? '--ei' : '--el', sq(k), sq(String(v)));
+    } else {
+      throw new Error(`extras.${k}: неподдерживаемый тип значения (${typeof v}) — допустимы string/boolean/integer`);
+    }
+  }
+  return flags;
+}
+
+/**
+ * Разбор вывода `am start -W` для intent-запуска (§4 спеки, ревизия 17.09).
+ *
+ * ⚠ Формат `-W` различается между SDK 28 и 36 (LaunchState/WaitTime/
+ * TotalTime появляются и пропадают) — разбираем ТЕРПИМО, по префиксу
+ * строки, а не одной регуляркой по всему выводу. `/Error|Exception/i` по
+ * всему тексту (как было в 1.2.4 для старого пути) ложно сработала бы на
+ * URI со словом error в эхо-строке `Starting: Intent { ... dat=... }`, а
+ * «Warning: ... has been delivered to currently running top-most instance»
+ * содержит «Activity not started», что похоже на отказ, а на деле успех.
+ * Эхо-строку `Starting: Intent { ... }` НЕ анализируем вовсе — в ней URI и
+ * extras как есть, включая любые слова пользователя.
+ */
+async function parseAmStartOutput(serial, out, ctx) {
+  const lines = String(out || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const nonEcho = lines.filter(l => !/^Starting:\s*Intent\s*\{/.test(l));
+  const rawOut = String(out || '').trim();
+
+  // 1. Нет обработчика.
+  if (nonEcho.some(l => /^Error:\s*Activity not started, unable to resolve Intent/.test(l)))
+    throw new Error(`Нет обработчика для этого intent (action=${ctx.action}).\n${rawOut}`);
+
+  // 2. «Доставлено в уже открытое» — успех, и проверяется ДО общих ошибок:
+  //    в строке есть «Activity not started», по виду похожее на отказ.
+  const delivered = nonEcho.find(l =>
+    /^Warning:\s*Activity not started, intent has been delivered to currently running top-most instance/.test(l));
+  if (delivered)
+    return text(`Доставлено в уже открытое (${ctx.pkg || ctx.action}).\n${delivered}`);
+
+  // 3. Диалог выбора обработчика — тул сам его открыл, сам и убирает: один
+  //    KEYCODE_BACK, перечитать resumed. Если диалог всё ещё наверху —
+  //    сообщить как есть, больше клавиш не слать (§9: не повторять и не
+  //    слать больше одного BACK).
+  const activityLine = nonEcho.find(l => /^Activity:\s*/.test(l));
+  if (activityLine && /ResolverActivity|ChooserActivity/.test(activityLine)) {
+    await adb(withSerial(serial, ['shell', 'input keyevent KEYCODE_BACK']));
+    await new Promise(r => setTimeout(r, 500));
+    const after = await resumedActivity(serial);
+    if (after.raw && /ResolverActivity|ChooserActivity/.test(after.raw))
+      return text(`Несколько обработчиков, диалог выбора всё ещё наверху: ${after.raw}`);
+    return text(`Несколько обработчиков, диалог выбора закрыт — укажи packages.\n${activityLine}`);
+  }
+
+  // 4. Прочие ошибки — по началу строки (Error:) или по регистрозависимому
+  //    вхождению «Exception», НЕ /error/i по всему выводу целиком. Именно
+  //    подстрока, а не \bException\b: `java.lang.SecurityException` — это
+  //    ОДНО слово-идентификатор, границы перед «Exception» в нём нет, и
+  //    \b-вариант эту строку молча пропускал бы (найдено при тестировании
+  //    без устройства — упало в п.5 и дёргало adb вместо честного отказа).
+  //
+  //    Подстрока «Exception» ищется НЕ по всем строкам, а только по тем, что
+  //    не начинаются с `Starting:` или `Activity:` — имя компонента вида
+  //    `pkg/.ExceptionHandlerActivity` попадает и в эхо-строку intent'а, и в
+  //    строку `Activity: pkg/.ExceptionHandlerActivity` из п.3, и это имя
+  //    активности, а не диагностика am. `Starting:` здесь избыточно поверх
+  //    nonEcho (тот уже вырезает `Starting: Intent {`), но перестраховка не
+  //    мешает, если формат эха когда-нибудь слегка изменится.
+  const errPool = nonEcho.filter(l => !/^Starting:/.test(l) && !/^Activity:/.test(l));
+  const errLine = errPool.find(l => /^Error:/.test(l) || l.includes('Exception'));
+  if (errLine) throw new Error(`am start отказал: ${errLine}\n${rawOut}`);
+
+  // 5. Status: ok или строки Status нет вовсе — подтверждаем по resumed, как в 1.2.4.
+  await new Promise(r => setTimeout(r, 1200));
+  const after = await resumedActivity(serial);
+  const okByResumed = ctx.pkg ? !!(after.raw && after.raw.includes(ctx.pkg)) : !!after.component;
+
+  const head = `intent (action=${ctx.action}${ctx.pkg ? `, -p ${ctx.pkg}` : ''})`;
+  if (okByResumed)
+    return text(`Launched через ${head}.\n${rawOut ? rawOut + '\n' : ''}Подтверждено на переднем плане: ${after.raw}`);
+
+  return text(
+    `⚠ ${head} отправлен без ошибки, но на переднем плане нужного пакета нет.\n` +
+    `Сейчас наверху: ${after.raw || '(определить не удалось — ни ResumedActivity, ни mCurrentFocus)'}\n${rawOut}`);
+}
+
+/**
+ * Intent/deep-link запуск (§4 спеки, 1.3.0) — параллельный путь к обычному
+ * запуску пакета по имени, включается наличием uri или intent_action.
+ * packages здесь необязателен: с одним значением уходит в `-p`, что сужает
+ * обработчик и убирает диалог выбора; больше одного — отказ (packages это
+ * не список получателей, а сужение резолвера).
+ */
+async function actLaunchIntent(serial, args, packages) {
+  if (packages.length > 1)
+    throw new Error(`action=launch с uri/intent_action принимает не больше одного пакета (для -p), получено: ${packages.join(', ')}`);
+  const pkg = packages[0] || null;
+
+  const action = String(args.intent_action || 'android.intent.action.VIEW');
+  if (!AM_TOKEN_RE.test(action))
+    throw new Error(`intent_action «${action}» не проходит по шаблону [A-Za-z0-9_.]+`);
+
+  if (CALL_ACTIONS.has(action) && !ALLOW_SHELL)
+    throw new Error(
+      `intent_action=${action} отказан: allow_shell выключен в конфигурации аддона, а intent-запуск не должен ` +
+      `молча вернуть возможность звонить. Если это осознанно нужно — включи allow_shell и используй adb_shell.`);
+
+  const extraFlags = extrasToAmFlags(args.extras);
+
+  const parts = ['am', 'start', '-W', '-a', sq(action)];
+  if (args.uri) parts.push('-d', sq(String(args.uri)));
+  if (pkg) parts.push('-p', sq(pkg));
+  parts.push(...extraFlags);
+  const cmd = `${parts.join(' ')} 2>&1`;
+
+  let out = '';
+  try {
+    out = await adbSh(serial, cmd, { timeout: 20000 });
+  } catch (e) {
+    // Таймаут `-W` — не провал запуска (спека §4): сообщаем и переходим к
+    // сверке resumed вместо отказа. Другие сбои (устройство недоступно и
+    // т.п.) пробрасываются — сверять resumed на мёртвом устройстве бессмысленно.
+    if (!/timeout|killed/i.test(e.message)) throw e;
+    out = 'am -W не дождался ответа (таймаут вызова) — сверяю, что запустилось, по resumed activity.';
+  }
+
+  return parseAmStartOutput(serial, out, { pkg, action });
+}
+
 async function actLaunch(serial, args) {
-  const pkg = coerceArray(args.packages || args.package)[0];
+  const packages = coerceArray(args.packages || args.package).filter(Boolean);
+
+  // §4 спеки: intent/deep-link путь включается наличием uri ИЛИ intent_action.
+  // Без обоих — старый путь ниже, без единого изменения поведения и текстов.
+  if (args.uri || args.intent_action) return actLaunchIntent(serial, args, packages);
+
+  const pkg = packages[0];
   if (!pkg) throw new Error('action=launch требует packages');
   // Запуск пакета по имени — задача неожиданно склочная, и 1.2.3 переписала
   // её после охоты по живым устройствам (Shield, Fire OS, Android 16).
@@ -365,11 +532,12 @@ async function actLaunch(serial, args) {
   // предупреждение срабатывало там, где сверять было попросту нечем.
   // Настоящий ответ даёт резюмированная активность; `mCurrentFocus`
   // оставлен вторым мнением для прошивок, где первого нет.
+  //
+  // 1.3.0: сама сверка вынесена в device.resumedActivity() — ею же
+  // пользуется intent-путь launch и verify у adb_tap/adb_swipe/adb_key
+  // (§4/§5 спеки). Рефакторинг: тексты и поведение этой ветки не меняются.
   await new Promise(r => setTimeout(r, 1200));
-  const resumed = (await adbSh(serial,
-    'dumpsys activity activities 2>/dev/null | grep -m1 -E "mResumedActivity|ResumedActivity"')).trim();
-  const focus = (await adbSh(serial,
-    'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus')).trim();
+  const { raw: seen, resumedLine: resumed, focusLine: focus } = await resumedActivity(serial);
 
   if (resumed.includes(pkg) || focus.includes(pkg))
     return text(
@@ -380,7 +548,6 @@ async function actLaunch(serial, args) {
   // не гонка, а самозакрытие: мастера первичной настройки и подобные
   // экраны проверяют своё условие и сразу finish() — так ведёт себя
   // com.nvidia.shield.welcome на Shield. Гадать не будем, покажем факты.
-  const seen = resumed || focus;
   return text(
     `⚠ ${pkg}: активность ${act} запущена без ошибки, но на переднем плане её НЕТ.\n` +
     `Сейчас наверху: ${seen || '(определить не удалось — ни ResumedActivity, ни mCurrentFocus)'}\n` +
@@ -732,4 +899,8 @@ async function adbApp(args) {
   }
 }
 
-module.exports = { adbApp, ALLOW_UNINSTALL, DEFAULT_STORE };
+module.exports = {
+  adbApp, ALLOW_UNINSTALL, DEFAULT_STORE,
+  // 1.3.0: экспортируется для юнит-проверок без устройства (§4 спеки).
+  parseAmStartOutput, extrasToAmFlags, CALL_ACTIONS, AM_TOKEN_RE,
+};

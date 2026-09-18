@@ -16,6 +16,7 @@
 
 const http = require('http');
 const { TOOLS, callTool } = require('./registry.js');
+const { escapeInputText } = require('./adb.js');
 
 const PORT = parseInt(process.argv[2] || '3199');
 const VERSION = process.env.ADDON_VERSION || '0.0.0-dev';
@@ -24,11 +25,59 @@ const ALLOW_UNINSTALL = process.env.ALLOW_UNINSTALL === 'true';
 // v0.2.2: tool-call лог под тем же флагом log_requests, что и HTTP-лог proxy.js
 const LOG_REQUESTS = process.env.LOG_REQUESTS === 'true';
 
-function fmtArgs(a) {
+/**
+ * §1 1.3.0 — маскировка аргументов ДО обрезки до 300 символов (иначе секрет
+ * мог случайно остаться внутри обрезанного хвоста только по счастью длины).
+ * adb_shell.command НЕ маскируется — это произвольная команда администратора,
+ * оговорка про это идёт в DOCS.md, а не в код.
+ */
+function maskArgs(name, args) {
+  const a = { ...(args || {}) };
+  if (name === 'adb_text' && a.text !== undefined) a.text = `<${String(a.text).length} chars>`;
+  if (name === 'adb_pair' && a.code !== undefined) a.code = '***';
+  for (const k of Object.keys(a)) {
+    if (/pass|secret|token/i.test(k)) a[k] = '***'; // страховка на будущие параметры
+  }
+  return a;
+}
+
+function fmtArgs(name, args) {
   try {
-    const s = JSON.stringify(a || {});
+    const s = JSON.stringify(maskArgs(name, args));
     return s.length > 300 ? s.slice(0, 300) + '…' : s;
   } catch { return '(unserializable)'; }
+}
+
+/**
+ * §1 1.3.0 (ревизия 17.09) — вторая утечка, помимо аргументов: `adb.js` при
+ * пустом stderr (таймаут, kill) берёт `err.message` вида
+ * `Command failed: adb ... shell input text "<текст>"` — секрет уходит и в
+ * ERROR-строку лога, и в текст ошибки, который видит клиент (а транскрипт
+ * чата сохраняется и пересылается). Маскировка аргументов эту форму не
+ * трогает — она работает с ДРУГИМ объектом (JSON args), а не со свободным
+ * текстом сообщения. Здесь вычищаются сам текст, его форма после
+ * escapeInputText (та, что реально попадает в `input text "..."`) и
+ * base64-форма (ветка ADBKeyBoard, `am broadcast ... --es msg <b64>`).
+ * Пустые и односимвольные значения не заменяются — иначе вырежет половину
+ * сообщения по совпадению с любым односимвольным фрагментом текста.
+ */
+function redact(name, args, str) {
+  if (!str) return str;
+  let out = String(str);
+  const wipe = secret => {
+    if (secret === undefined || secret === null) return;
+    const s = String(secret);
+    if (s.length < 2) return;
+    out = out.split(s).join('<secret>');
+  };
+  if (name === 'adb_text' && args && args.text !== undefined) {
+    const t = String(args.text);
+    wipe(t);
+    wipe(escapeInputText(t));
+    wipe(Buffer.from(t, 'utf8').toString('base64'));
+  }
+  if (name === 'adb_pair' && args && args.code !== undefined) wipe(args.code);
+  return out;
 }
 
 function fmtOutcome(content) {
@@ -41,7 +90,7 @@ function fmtOutcome(content) {
 
 function logTool(name, args, t0, outcome) {
   if (!LOG_REQUESTS) return;
-  console.log(`[tool] ${new Date().toISOString()} ${name} ${fmtArgs(args)} -> ${outcome} ${Date.now() - t0}ms`);
+  console.log(`[tool] ${new Date().toISOString()} ${name} ${fmtArgs(name, args)} -> ${outcome} ${Date.now() - t0}ms`);
 }
 
 async function handleMcpRequest(body) {
@@ -69,8 +118,11 @@ async function handleMcpRequest(body) {
       logTool(params.name, params.arguments, t0, fmtOutcome(content));
       return { jsonrpc: '2.0', id, result: { content } };
     } catch (e) {
-      logTool(params.name, params.arguments, t0, `ERROR: ${e.message}`);
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true } };
+      // §1 1.3.0: redact — ОДИН раз, применяется и к ERROR-строке лога, и к
+      // тексту, который уходит клиенту (транскрипт чата тоже сохраняется).
+      const msg = redact(params.name, params.arguments, e.message);
+      logTool(params.name, params.arguments, t0, `ERROR: ${msg}`);
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true } };
     }
   }
 
@@ -115,9 +167,16 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  process.stderr.write(
-    `ADB MCP Server v${VERSION} on port ${PORT} ` +
-    `(${TOOLS.length} tools, shell ${ALLOW_SHELL ? 'enabled' : 'DISABLED'}, ` +
-    `uninstall ${ALLOW_UNINSTALL ? 'ALLOWED' : 'blocked'}, tool log ${LOG_REQUESTS ? 'ON' : 'off'})\n`);
-});
+// 1.3.0: слушатель стартует только при прямом запуске (`node server.js`), а
+// не при require() — так fmtArgs/redact можно проверить `node -e` без
+// устройства, не поднимая реальный HTTP-сервер (см. проверки §1 спеки).
+if (require.main === module) {
+  server.listen(PORT, () => {
+    process.stderr.write(
+      `ADB MCP Server v${VERSION} on port ${PORT} ` +
+      `(${TOOLS.length} tools, shell ${ALLOW_SHELL ? 'enabled' : 'DISABLED'}, ` +
+      `uninstall ${ALLOW_UNINSTALL ? 'ALLOWED' : 'blocked'}, tool log ${LOG_REQUESTS ? 'ON' : 'off'})\n`);
+  });
+}
+
+module.exports = { fmtArgs, redact, maskArgs, fmtOutcome, handleMcpRequest };

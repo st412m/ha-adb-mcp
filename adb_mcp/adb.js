@@ -112,6 +112,25 @@ function coerceBool(v, dflt) {
   return String(v).toLowerCase() === 'true';
 }
 
+// 1.3.0: тот же баг клиента claude.ai, что coerceArray (урок 0.5.1) — объекты
+// сериализуются JSON-строкой точно так же, как массивы. Нужен для adb_app
+// action=launch extras.
+function coerceObject(v) {
+  if (v === undefined || v === null) return {};
+  if (typeof v === 'object' && !Array.isArray(v)) return v;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return {};
+    if (s.startsWith('{') && s.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(s);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      } catch { /* не JSON — падаем в отказ ниже */ }
+    }
+  }
+  throw new Error(`extras: ожидался объект ключ→значение, получено ${JSON.stringify(v).slice(0, 120)}`);
+}
+
 function resolveSafeHostPath(p) {
   const resolved = path.resolve(p);
   if (!FILE_ROOTS.some(root => resolved === root || resolved.startsWith(root + '/')))
@@ -133,6 +152,6 @@ module.exports = {
   FILE_ROOTS, ADB_TIMEOUT_MS, ADB_MAX_BUFFER,
   adb, adbSh, withSerial, friendlyAdbError,
   sq, text, json, escapeInputText,
-  coerceArray, coerceBool,
+  coerceArray, coerceBool, coerceObject,
   resolveSafeHostPath, ensureDir, sanitizeSerial,
 };

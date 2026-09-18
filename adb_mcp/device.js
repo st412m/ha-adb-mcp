@@ -746,9 +746,33 @@ async function protectedSet(serial, opts = {}) {
   };
 }
 
+/**
+ * «Что сейчас наверху» — общая сверка, вынесенная из adb_app action=launch
+ * (1.3.0, §4 спеки). Ею пользуются оба пути launch (monkey/resolve-activity
+ * и новый intent-запуск) и verify у adb_tap/adb_swipe/adb_key (§5) — поэтому
+ * функция здесь, в device.js, а не в apps.js или ui.js: эти два модуля не
+ * должны знать друг про друга.
+ *
+ * Паттерн grep ОСТАВЛЕН как в 1.2.4 (`mResumedActivity|ResumedActivity`) —
+ * он принят на живых устройствах (Fire TV/Shield/TiVo), и спека прямо
+ * запрещает его расширять сейчас. `topResumedActivity` (SDK 36) этим grep'ом
+ * не поймать — это записывается на приёмке, а не чинится здесь. Извлечение
+ * компонента (pkg/Activity) — отдельная регулярка, которой всё равно, какой
+ * префикс был у строки; не выделилось — null, а не догадка.
+ */
+async function resumedActivity(serial) {
+  const resumedLine = (await adbSh(serial,
+    'dumpsys activity activities 2>/dev/null | grep -m1 -E "mResumedActivity|ResumedActivity"')).trim();
+  const focusLine = (await adbSh(serial,
+    'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus')).trim();
+  const raw = resumedLine || focusLine;
+  const m = /([A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+)/.exec(raw);
+  return { raw, component: m ? m[1] : null, resumedLine, focusLine };
+}
+
 module.exports = {
   CORE_PROTECTED, CORE_PREFIXES, ACCOUNT_HINTS, PKG_RE, LOCALE_RE,
   getProps, listPackages, accountSnapshot, protectedSet, roleHolders,
   netListeners, servingHits, servingRefusal, authProviders, decodeAddr, isLoopback,
-  pkgOf, looksLikePackage, splitMarked, markedCommand,
+  pkgOf, looksLikePackage, splitMarked, markedCommand, resumedActivity,
 };
