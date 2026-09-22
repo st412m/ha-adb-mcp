@@ -284,12 +284,12 @@ async function darknessWarning(serial, geom) {
   const secure = await secureWindowFlag(serial).catch(() => null);
 
   const parts = [];
-  if (wake) parts.push(`Экран: ${wake}`);
-  if (secure === true) parts.push('окно в фокусе с FLAG_SECURE — содержимое скрыто системой');
-  else if (secure === false) parts.push('признак защиты не найден — возможно, кадр действительно чёрный');
+  if (wake) parts.push(`screen: ${wake}`);
+  if (secure === true) parts.push('focused window has FLAG_SECURE, content hidden by the system');
+  else if (secure === false) parts.push('no protection flag found, the frame may genuinely be black');
   // secure === null — не определено, без догадок, ничего не добавляем.
 
-  return `⚠ кадр почти равномерно тёмный (mean ${meanTxt}, sd ${sdTxt}).${parts.length ? ' ' + parts.join(', ') : ''}`;
+  return `⚠ frame is almost uniformly dark (mean ${meanTxt}, sd ${sdTxt}).${parts.length ? ' ' + parts.join(', ') : ''}`;
 }
 
 async function screenshot(args) {
@@ -331,18 +331,18 @@ async function screenshot(args) {
     // логического размера — на TiVo Stream 4K (только Physical, без
     // Override) они совпадают, и лишняя строка была бы шумом.
     const frameNote = (rec.frameW !== rec.screenW || rec.frameH !== rec.screenH)
-      ? ` (кадр ${rec.frameW}x${rec.frameH})` : '';
+      ? ` (frame ${rec.frameW}x${rec.frameH})` : '';
     // wm size не распарсился — честный фолбэк на размер кадра, ПОМЕЧЕННЫЙ
     // в тексте, а не тихая подстановка без предупреждения.
     const fallbackNote = rec.fallback
-      ? ' ⚠ wm size не распарсился — используется размер кадра, координаты могут не совпасть с input tap' : '';
+      ? ' ⚠ wm size did not parse, the frame size is used - coordinates may not match input tap' : '';
 
-    scaleTxt = `screen ${rec.screenW}x${rec.screenH}${frameNote} → image ${geom.w}x${geom.h} · scale ${sx.toFixed(3)}/${sy.toFixed(3)} · ` +
-      `для adb_tap/adb_swipe передай coords="screenshot"${fallbackNote}`;
+    scaleTxt = `screen ${rec.screenW}x${rec.screenH}${frameNote} -> image ${geom.w}x${geom.h} · scale ${sx.toFixed(3)}/${sy.toFixed(3)} · ` +
+      `pass coords="screenshot" to adb_tap/adb_swipe${fallbackNote}`;
   } else {
     // Честно: геометрия не разобралась (неожиданный вывод IM на этой сборке) —
     // coords="screenshot" для этого кадра недоступен, а не подставляется наугад.
-    scaleTxt = `геометрия кадра не определена — для adb_tap/adb_swipe используй coords="screen" (по умолчанию)`;
+    scaleTxt = `frame geometry not determined - use coords="screen" (the default) for adb_tap/adb_swipe`;
   }
 
   const warnTxt = (geom && geom.dark === true) ? '\n' + await darknessWarning(serial, geom) : '';
@@ -469,13 +469,13 @@ function resolveCoord(coordsMode, x, y, serial) {
   const g = lastScreenshotGeom.get(geomKey(serial));
   if (!g || (Date.now() - g.ts) > SCREENSHOT_GEOM_TTL_MS)
     throw new Error(
-      'снимок устарел или не делался — сделай adb_screenshot. ' +
-      'serial должен передаваться так же, как в adb_screenshot — снимок без serial и тап с serial дают разные ключи.');
+      'the screenshot is stale or was never taken - call adb_screenshot. ' +
+      'Pass serial the same way as in adb_screenshot: a screenshot without serial and a tap with serial are different keys.');
 
   const xi = Math.round(x), yi = Math.round(y);
   const xOut = Math.min(Math.max(Math.round(xi * g.sx), 0), g.W - 1);
   const yOut = Math.min(Math.max(Math.round(yi * g.sy), 0), g.H - 1);
-  return { x: xOut, y: yOut, note: ` — из координат снимка (${xi},${yi}) × ${g.sx.toFixed(3)}/${g.sy.toFixed(3)}` };
+  return { x: xOut, y: yOut, note: ` - from screenshot coordinates (${xi},${yi}) × ${g.sx.toFixed(3)}/${g.sy.toFixed(3)}` };
 }
 
 /**
@@ -506,19 +506,19 @@ async function runVerify(serial, mode, act) {
   const comp = r => (r && r.ok && r.value.component) ? r.value.component : null;
   const b = comp(beforeR), a = comp(afterR);
   let activityTxt;
-  if (!beforeR.ok && !afterR.ok) activityTxt = `resumed: не определено (${afterR.error || beforeR.error})`;
-  else if (b === null || a === null) activityTxt = 'resumed: не определено';
-  else if (b === a) activityTxt = `resumed: без изменений (${b})`;
-  else activityTxt = `resumed: ${b} → ${a}`;
+  if (!beforeR.ok && !afterR.ok) activityTxt = `resumed: unknown (${afterR.error || beforeR.error})`;
+  else if (b === null || a === null) activityTxt = 'resumed: unknown';
+  else if (b === a) activityTxt = `resumed: unchanged (${b})`;
+  else activityTxt = `resumed: ${b} -> ${a}`;
 
   if (mode === 'activity') return { note: ` · ${activityTxt}`, changed: null };
 
   if (!xmlBeforeR.ok)
-    return { note: ` · ${activityTxt} · ui: не определено (${xmlBeforeR.error})`, changed: null };
+    return { note: ` · ${activityTxt} · ui: unknown (${xmlBeforeR.error})`, changed: null };
 
   let xmlAfterR = await safe(() => dumpXml(serial));
   if (!xmlAfterR.ok)
-    return { note: ` · ${activityTxt} · ui: не определено (${xmlAfterR.error})`, changed: null };
+    return { note: ` · ${activityTxt} · ui: unknown (${xmlAfterR.error})`, changed: null };
 
   let changed = hashUiXml(xmlBeforeR.value) !== hashUiXml(xmlAfterR.value);
   if (!changed) {
@@ -527,7 +527,7 @@ async function runVerify(serial, mode, act) {
     const retryR = await safe(() => dumpXml(serial));
     if (retryR.ok) changed = hashUiXml(xmlBeforeR.value) !== hashUiXml(retryR.value);
   }
-  return { note: ` · ${activityTxt} · ui: ${changed ? 'изменился' : 'не изменился'}`, changed };
+  return { note: ` · ${activityTxt} · ui: ${changed ? 'changed' : 'unchanged'}`, changed };
 }
 
 /**
@@ -560,7 +560,7 @@ async function swipe(args) {
     () => adb(withSerial(args.serial, ['shell', `input swipe ${c1.x} ${c1.y} ${c2.x} ${c2.y} ${Math.round(d)}`])));
   // §5: у свайпа «не изменился» отдельно означает конец списка — модели это
   // не всегда очевидно без подсказки, у тапа такой смысловой связки нет.
-  const scrollHint = (v.changed === false) ? ' (для прокрутки обычно значит конец списка)' : '';
+  const scrollHint = (v.changed === false) ? ' (for a scroll this usually means the end of the list)' : '';
   const note = c1.note || c2.note;
   return text(`Swiped (${c1.x},${c1.y}) -> (${c2.x},${c2.y}) in ${d}ms${note}${v.note}${scrollHint}`);
 }
@@ -701,7 +701,7 @@ async function currentWindow(serial) {
 async function findAndTap(args) {
   const serial = args.serial;
   if (!args.text && !args.resource_id && !args.desc)
-    throw new Error('укажи хотя бы один критерий: text, resource_id или desc');
+    throw new Error('pass at least one criterion: text, resource_id or desc');
 
   const caps = await deviceCaps(serial);
   let nodes = parseUiNodes(await uiXmlFresh(serial));
@@ -729,7 +729,7 @@ async function findAndTap(args) {
       visible.push(`  ${label}${tail ? ` [id=${tail}]` : ''}`);
       if (visible.length >= 40) break;
     }
-    throw new Error(`Элемент не найден. Видны сейчас:\n${visible.join('\n') || '  (ничего с текстом)'}`);
+    throw new Error(`Element not found. Visible now:\n${visible.join('\n') || '  (nothing with a label)'}`);
   }
 
   // 1.2.2: то же самое, но уже по существу. Контейнер и лежащая внутри него
@@ -748,7 +748,7 @@ async function findAndTap(args) {
 
   if (hits.length > 1 && args.index === undefined) {
     const list = hits.map((n, i) => `  [${i}] ${nodeLabel(n, nodes)} @(${n.x},${n.y})`).join('\n');
-    throw new Error(`Под критерий попало ${hits.length} элементов — уточни запрос или задай index:\n${list}`);
+    throw new Error(`${hits.length} elements match the criteria - narrow the query or pass index:\n${list}`);
   }
   let target = hits[Math.min(Number(args.index) || 0, hits.length - 1)];
   const targetLabel = nodeLabel(target, nodes) || nodeKey(target, nodes);
@@ -776,13 +776,13 @@ async function findAndTap(args) {
     await adb(withSerial(serial, ['shell', `input tap ${target.x} ${target.y}`]));
     const winAfter = await currentWindow(serial);
     return text(
-      `Тап по «${targetLabel}» @(${target.x},${target.y}) — у устройства есть touchscreen.\n` +
-      `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (это нормально для внутриэкранных действий)'}`);
+      `Tapped "${targetLabel}" @(${target.x},${target.y}) - the device has a touchscreen.\n` +
+      `Window ${winAfter && winAfter !== winBefore ? 'changed' : 'did NOT change (normal for in-screen actions)'}`);
   }
 
   // ── leanback: обход DPAD'ом ──
   if (!caps.leanback)
-    throw new Error('У устройства нет ни touchscreen, ни leanback — как активировать элемент, неизвестно. Отказ вместо слепого тапа.');
+    throw new Error('The device reports neither touchscreen nor leanback - there is no known way to activate the element. Refused instead of tapping blind.');
 
   // 1.2.1: дефолт снижен 20 → 12 и добавлен дедлайн по часам. Каждый шаг —
   // полный uiautomator dump (~1.5–2 с), поэтому 20 шагов не укладывались в
@@ -798,8 +798,8 @@ async function findAndTap(args) {
     const cur = nodes.find(n => n.focused);
     if (!cur) {
       throw new Error(
-        `Фокус на экране не найден — вести DPAD'ом не от чего. ` +
-        `Нажми любую клавишу (adb_key DPAD_DOWN) и повтори.${trail.length ? ` Пройдено: ${trail.join(' ')}` : ''}`);
+        `No focused element on screen - there is nothing to walk from. ` +
+        `Press any key (adb_key DPAD_DOWN) and retry.${trail.length ? ` Walked: ${trail.join(' ')}` : ''}`);
     }
     const curKey = nodeKey(cur, nodes);
     if (curKey === targetKey) break;
@@ -809,17 +809,17 @@ async function findAndTap(args) {
     // детектор ловил только полную остановку — «фокус-то двигается».
     if (visited.has(curKey)) {
       throw new Error(
-        `Фокус зациклился: вернулся на «${nodeLabel(cur, nodes) || '(без подписи)'}», уже пройденный на этом обходе ` +
-        `(${trail.join(' ')}). Цель «${targetLabel}» недостижима обходом — скорее всего она нефокусируема. ` +
-        `НИЧЕГО НЕ НАЖАТО.`);
+        `Focus is cycling: back on "${nodeLabel(cur, nodes) || '(no label)'}", already visited on this walk ` +
+        `(${trail.join(' ')}). Target "${targetLabel}" cannot be reached by walking - it is most likely not focusable. ` +
+        `Nothing was pressed.`);
     }
     visited.add(curKey);
 
     if (Date.now() > deadline) {
       throw new Error(
-        `Обход прерван по времени (${trail.length} шагов: ${trail.join(' ')}), чтобы вернуть отчёт, ` +
-        `а не молчание по таймауту. Сейчас в фокусе: «${nodeLabel(cur, nodes) || '(без подписи)'}», ` +
-        `цель «${targetLabel}» не достигнута. НИЧЕГО НЕ НАЖАТО.`);
+        `Walk stopped on its time budget after ${trail.length} step${trail.length === 1 ? '' : 's'} (${trail.join(' ')}), ` +
+        `so a report is returned instead of a timeout. Focused now: "${nodeLabel(cur, nodes) || '(no label)'}", ` +
+        `target "${targetLabel}" not reached. Nothing was pressed.`);
     }
 
     const dx = target.x - cur.x, dy = target.y - cur.y;
@@ -846,9 +846,9 @@ async function findAndTap(args) {
       stuck++;
       if (stuck >= 2)
         throw new Error(
-          `Фокус не двигается ни по одной оси, остался на «${nodeLabel(now, nodes) || '(без подписи)'}». ` +
-          `Цель «${targetLabel}» не достигнута за ${step + 1} шагов (${trail.join(' ')}). ` +
-          `Ничего не нажато — веди вручную через adb_key.`);
+          `Focus does not move on either axis, still on "${nodeLabel(now, nodes) || '(no label)'}". ` +
+          `Target "${targetLabel}" not reached in ${step + 1} step${step === 0 ? '' : 's'} (${trail.join(' ')}). ` +
+          `Nothing was pressed - walk manually with adb_key.`);
     } else {
       stuck = 0;
     }
@@ -857,18 +857,18 @@ async function findAndTap(args) {
   const finalFocus = nodes.find(n => n.focused);
   if (!finalFocus || nodeKey(finalFocus, nodes) !== targetKey)
     throw new Error(
-      `За ${maxSteps} шагов фокус до цели не дошёл (${trail.join(' ')}). ` +
-      `Сейчас в фокусе: «${finalFocus ? (nodeLabel(finalFocus, nodes) || '(без подписи)') : 'ничего'}». ` +
-      `НИЧЕГО НЕ НАЖАТО. Увеличь max_steps или веди вручную.`);
+      `Focus did not reach the target in ${maxSteps} steps (${trail.join(' ')}). ` +
+      `Focused now: "${finalFocus ? (nodeLabel(finalFocus, nodes) || '(no label)') : 'nothing'}". ` +
+      `Nothing was pressed. Raise max_steps or walk manually.`);
 
   await adb(withSerial(serial, ['shell', 'input keyevent DPAD_CENTER']));
   await new Promise(r => setTimeout(r, 400));
   const winAfter = await currentWindow(serial);
 
   return text(
-    `Активировано «${targetLabel}» через DPAD (устройство leanback, touchscreen нет).\n` +
-    `Путь: ${trail.length ? trail.join(' → ') : 'уже было в фокусе'} → CENTER\n` +
-    `Окно ${winAfter && winAfter !== winBefore ? 'сменилось' : 'НЕ сменилось (нормально для внутриэкранных действий)'}`);
+    `Activated "${targetLabel}" via DPAD (leanback device, no touchscreen).\n` +
+    `Path: ${trail.length ? trail.join(' -> ') : 'already focused'} -> CENTER\n` +
+    `Window ${winAfter && winAfter !== winBefore ? 'changed' : 'did NOT change (normal for in-screen actions)'}`);
 }
 
 module.exports = {

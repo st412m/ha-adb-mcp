@@ -1,199 +1,272 @@
 # Changelog
 
-## 1.3.0
-Five ideas carried over from reading Turbo1123/roubao, an on-device VLM agent built on Shizuku. Its agent loop is not relevant here, but two of the five exposed real holes in this add-on, starting with the most important one.
+## 1.3.1 — 2026-09-22
 
-**A logging fix, not a feature: `adb_text` input was leaking into the tool log and into error text, in two separate places.** With `log_requests: true` — the setting used in production — every argument passed to a tool was logged as-is up to 300 characters, so anything typed through `adb_text`, passwords included, sat in the add-on's HA log in plain text. That was the obvious half of the leak. The second, easy to miss, is that `adb.js` builds its error message from `err.message` whenever a command produces no stderr (a timeout, a kill) — and that message is literally `Command failed: adb ... shell input text "<the text>"`, or the base64 form for the ADBKeyBoard broadcast path, or the pairing code for `adb pair`. That text reaches both the `ERROR:` log line and the error returned to the client, and a chat transcript is saved and forwarded just like the log is. Arguments are now masked before truncation (`adb_text.text` → `<N chars>`, `adb_pair.code` → `***`, and any top-level key matching `/pass|secret|token/i` as a safety net for future parameters), and a second pass strips the same secret — plain, `input text`-escaped, and base64 — out of any error text on the way out. `adb_shell.command` is deliberately left unmasked: it is an arbitrary administrator command, and DOCS.md now says plainly that shell commands are logged verbatim, so secrets belong in `adb_text`, not in `input text` typed through `adb_shell`. `adb_text`'s own response no longer echoes the typed text either — it reports `Typed N chars (ASCII)` / `Typed N chars (unicode via ADBKeyBoard)`; the model already knows what it sent.
+Every string the tools return is English; documentation split into `README.md` + `docs/`.
 
-**`adb_screenshot` now reports the scale between the screen and the image it returns, and `adb_tap`/`adb_swipe` can use it — and the first cut of this fix was wrong.** It measured only the PNG and the resized JPEG and assumed that was the space `input tap` operates in. Acceptance on five devices (2026-09-18, a Galaxy Watch 6 added in a follow-up round) found otherwise: `input tap` and `uiautomator` work in the *logical* size reported by `wm size` (its `Override size:` line when present, else `Physical size:`), which does not always match what `screencap` returns. Three combinations were confirmed live, each by tapping an actual pixel: the Shield has `Override 1920×1080` under a `Physical 3840×2160`, and `screencap` hands back the full physical 3840×2160 frame; the Fire TV reports the *identical* `wm size` pair, but its `screencap` already returns the logical 1920×1080 (confirmed from the PNG header) — so "there's an `Override` line, halve it" would have been actively wrong on this box; the TiVo, a Galaxy S22 and a Galaxy Watch 6 have no `Override` line and no discrepancy at all — the watch (480×480) is also the one device smaller than `max_px`, so its resize is a no-op and the response is a plain `scale 1.000/1.000`. The rule that survives all of this is comparing the two measured sizes directly, never inferring from the presence of an `Override` line or from a device name: the response always shows the logical size, and adds `(кадр WxH)` only when the measured PNG size actually differs from it. Orientation is settled by the PNG, confirmed on the S22: rotated to landscape, `wm size` kept reporting the portrait numbers it always reports, the PNG came back landscape, and the logical width/height were swapped to match — the resulting `coords="screenshot"` tap landed correctly. `wm size` is read fresh on every screenshot rather than cached (measured at 34ms on the Shield, negligible next to the rest of the pipeline) — a device can switch its physical display mode between two screenshots, so a cached ratio could go stale; a device where `wm size` can't be read or parsed falls back to the old frame-based behaviour with an explicit note, though that fallback has only been exercised synthetically so far. This did cost the "no extra call" framing this section originally had: geometry now runs three ImageMagick invocations instead of one (0.72s vs. 0.45s measured on a 4K frame) plus the `wm size` call above, all still inside the one shell pipeline that already produces the JPEG. The IM command and its output parsing live in one function in `ui.js`; the build-time smoke in `toolchain-check.sh` calls that function against synthetic PNGs instead of keeping its own copy of the pipeline, which would have tested a duplicate rather than the code `adb_screenshot` actually runs — `wm size` itself needs a device and isn't part of that smoke.
+### Changed
+- Tool output, warnings, refusals and error messages are in English; wording changed, behaviour did not.
+- Tool and parameter descriptions carry call-time facts only; the rest moved to `docs/`.
+- Build-time guard messages in `toolchain-check.sh` are in English.
+- `README.md` is a landing page; full tool semantics, configuration notes, troubleshooting and internals live in `docs/`.
+- The add-on documentation tab (`DOCS.md`) is an operator manual for a freshly installed add-on and links out for the rest.
+- The `adb_app` network-guard status is now `not_serving` / `overridden` / `blind`; `clear` read ambiguously next to the `action=clear` value.
 
-**A near-uniformly dark screenshot is now a warning, not a silent "empty screen".** Exit code 98 only ever caught a genuinely empty file; a black frame of normal size — which some firmware may return for a `FLAG_SECURE` window — passed straight through and looked to the model exactly like "the screen is blank". A real dark frame is also completely legitimate (a paused dark scene, a screensaver), so the response is a warning after the image rather than a refusal, which would take the picture away exactly where it is needed most. The same IM invocation that produces the JPEG also computes `fx:mean` and `fx:standard_deviation` on the already-downscaled image, and a frame under the (starting, tunable) thresholds gets a best-effort explanation appended: `dumpsys power`'s `mWakefulness`, and a `FLAG_SECURE` flag read off the focused window, filtered on-device so a several-hundred-KB window dump never crosses into Node. Acceptance (2026-09-18) confirmed the core case: a sleeping Shield returns a normal-sized black 3840×2160 frame rather than an empty one, and the warning fires correctly (`mean 0.004, sd 0.000, Экран: Asleep`); the dark Google TV launchers on the Shield and TiVo were checked specifically and did not false-trigger. The `FLAG_SECURE` half is a different story: on a Galaxy S22 (Android 16 / SDK 36) it is not available at all — `dumpsys window windows` on this build never prints an `mCurrentFocus` line (that line only exists in the separate `dumpsys window`), so the in-focus window can't even be located, and separately its `fl=` values print as a bare number with no `SECURE` token anywhere in the dump for the named-flags branch to match either. Both resolve to the existing "not determined" path rather than a guess. SDK 28–31 (the TV boxes) were not exercised for this specific signal in this round, so the warning there is currently `mWakefulness`-only in practice, not just in the worst case.
+## 1.3.0 — 2026-09-18
 
-**`adb_app action=launch` accepts an intent/deep-link form.** Alongside launching by package name, `uri` and/or `intent_action` (default `android.intent.action.VIEW` once `uri` is set) build `am start -W -a <action> [-d <uri>] [-p <pkg>] [extras...]`; `extras` maps string → `--es`, boolean → `--ez`, an integer fitting int32 → `--ei`, a larger integer → `--el`, and refuses anything else by naming the key — it also accepts a JSON-stringified object, the same claude.ai client quirk `coerceArray` already works around for arrays. `packages` stays optional here: a single value narrows the resolver via `-p`, more than one is a refusal. Parsing `-W`'s output is done by line prefix rather than one `/Error|Exception/i` sweep over the whole text, because that sweep has two known false triggers: a URI containing the word "error" inside the echoed `Starting: Intent { ... }` line, and `Warning: Activity not started, intent has been delivered to currently running top-most instance` — a *success* whose text contains "Activity not started". The echoed `Starting:` line is never inspected at all. A resolver/chooser dialog gets exactly one `KEYCODE_BACK` from the tool that opened it, never more, and the "what's on top" check (`ResumedActivity`/`mResumedActivity`, `mCurrentFocus` as a fallback) is now a shared function in `device.js` used by both launch paths and by `verify` below — the old launch path's own text and behaviour are unchanged, this is a refactor. **`intent_action=android.intent.action.CALL`/`CALL_PRIVILEGED`/`CALL_EMERGENCY` is refused while `allow_shell: false`, independent of whether the call would actually place one** — the sources disagree on whether the `shell` uid can dial through this intent at all, and settling that means placing a real call, which is out of scope; the point is that a disabled `adb_shell` must not become a quiet side door back to dialing, whatever the answer turns out to be. `allow_shell: true` does not refuse, since `adb_shell` can already do this anyway.
+Secrets stop reaching the log, screenshots carry their scale, and input tools can verify what they did.
 
-**`verify` on `adb_tap`, `adb_swipe` and `adb_key` replaces a separate VLM before/after comparison (as seen in roubao) with something deterministic, built from parts the add-on already has.** `verify: "none"` (default, unchanged latency) | `"activity"` | `"ui"`. `"activity"` compares the resumed activity before and after the action. `"ui"` adds a UI-dump hash comparison, with one 600ms retry if the hashes match (the change might just be animating), reported as "changed"/"unchanged" — for a swipe, "unchanged" is annotated as usually meaning the end of a scrollable list. The hash is computed on a normalised dump with every `com.android.systemui` node removed, or a status-bar clock would report "changed" on every single call; focus and selection are deliberately *not* stripped, since for a DPAD key that is the change being verified. This is a known, documented trade-off, and acceptance (2026-09-18) produced live instances of exactly it across three unrelated device classes: two plain `adb_ui_dump` calls with no action in between came back different on a playing YouTube video, purely because its on-screen timer ticked from "0 минут 18 секунд" to "0 минут 25 секунд", and `adb_key VOLUME_MUTE verify="ui"` duly reported `изменился` both times nothing had actually changed; the Google TV launchers (Shield, TiVo) have the same problem from a launcher clock, Fire TV's launcher from a self-rotating carousel instead, and a Galaxy Watch 6 watch face from a `[BTN] 16:52 Новые уведомления` time node — none of these three sit inside `com.android.systemui`, so systemui-stripping alone was never going to cover any of them. `"не изменился"` stays reliable regardless, since it only fires when nothing at all changed. **A verify failure never turns a performed action into an error** — the action has already happened by the time anything in verify could fail — and this was confirmed live, not just designed for: with a Galaxy Watch 6's screen off, `uiautomator` failed with `ERROR: null root node returned by UiTestAutomationBridge`, and the tool still returned a complete, correct response — `Tapped (240, 262) — из координат снимка (240,262) × 1.000/1.000 · resumed: A → B · ui: не определено (uiautomator: ERROR: null root node ...)` — the tap and the `resumed` check both went through, only `ui` came back undetermined. With the same watch's screen on, both a plain dump and `verify="ui"` worked normally. The failure tracks the screen being off specifically, not Wear OS in general; video playback (Immich, YouTube fullscreen and windowed, on a Galaxy S22) still has not reproduced a `uiautomator` failure of its own. `verify="ui"` uses `dumpXml()` directly, never `uiXmlFresh()`, and never touches the staleness-detection hash `adb_ui_dump` relies on — the two caches would otherwise interfere. `dumpXml()` itself now writes to a randomly-suffixed file (`/sdcard/adbmcp_ui_<random>.xml`, removed in a `finally`) instead of the one shared `adbmcp_ui.xml` — a latent race for any two concurrent dumps, made three times as likely by `verify="ui"`'s extra dumps per call.
+### Added
+- `adb_screenshot` reports the logical screen size, the image size and the scale between them; `coords="screenshot"` on `adb_tap`/`adb_swipe` reuses those coordinates within 120 s of the screenshot.
+- `verify="activity"|"ui"` on `adb_tap`, `adb_swipe` and `adb_key` reports whether the action changed the resumed activity or the UI dump. A verify failure never turns a performed action into an error.
+- A near-uniformly dark screenshot returns a warning naming `mWakefulness` and, where readable, `FLAG_SECURE`, instead of passing as an ordinary frame.
+- `adb_app action=launch` accepts `uri`, `intent_action` and `extras` for an intent or deep-link launch.
+- `adb_ui_dump` marks `password="true"` nodes `[PASSWORD]` and lists them even with no label of their own.
 
-**Two smaller changes.** `adb_ui_dump` now marks `password="true"` nodes `[PASSWORD]` and lists them even with no `clickable`/`text`/`content-desc` of their own — they used to be dropped entirely; `adb_find_and_tap`'s own matching logic is untouched. `adb_swipe`'s description now notes that the same start/end point with `duration_ms >= 800` is how you send a long-press.
+### Changed
+- `intent_action=CALL`, `CALL_PRIVILEGED` and `CALL_EMERGENCY` are refused while `allow_shell: false`.
+- `adb_swipe`'s description records that the same start and end point with `duration_ms >= 800` is a long-press.
 
-## 1.2.5
-The network signal stops being a report and becomes a refusal.
+### Fixed
+- With `log_requests: true`, `adb_text` input and `adb_pair` codes reached the tool log and could appear in error text. Both are masked now, and `adb_text` no longer echoes the typed text.
+- Screen geometry comes from `wm size` rather than the captured frame, so `coords="screenshot"` lands correctly on devices that capture above their logical resolution.
+- `dumpXml()` writes to a randomly named file, closing a race between concurrent dumps.
 
-**A package that is serving an off-device client right now is no longer disabled, uninstalled, force-stopped or cleared.** The criterion is read off the device and is deliberately narrow: the package holds a listening TCP socket *and* there is an inbound ESTABLISHED connection to that same local port from a non-loopback peer. The refusal names the port and the peer, and only an explicit `force_network: true` lifts it.
+## 1.2.5 — 2026-09-07
 
-Both halves are needed, and each rules out a specific false positive seen on the fleet. Listening alone is not enough — plenty of things listen speculatively, and refusing on that would make every torrent server and VPN client undisableable. An ESTABLISHED row alone is not enough either: with a high local port it is an *outbound* connection the app opened, and a video box has dozens of those at any moment. A remote loopback address does not count, because v2rayNG's inbound connections on 10808 come from the same device and are not an external dependency. What remains — someone else's address connected to a port the package is listening on — is direct evidence that something outside the device depends on this package at this moment.
+The network signal becomes a refusal instead of a report.
 
-**Why this rather than a package name in the core list.** The case that prompted it is `com.google.android.tv.remote.service` on an Android 11 Shield, which holds 6466/6467 and talks to Home Assistant through the `androidtv_remote` integration. Adding that name to `CORE_PROTECTED` would protect exactly the flat it was written in: the repository is public, and on someone else's box the integration channel is held by a different package, which the add-on would then remove with a clear conscience. A signal taken from the device works on hardware nobody here has ever seen.
+### Added
+- A package currently serving an off-device client — a listening TCP socket plus an inbound ESTABLISHED connection to that port from a non-loopback peer — is refused for `disable`, `uninstall`, `stop` and `clear`, naming the port and the peer.
+- `force_network: true` lifts that guard and nothing else; it does not lift the protected set.
+- A guard that cannot read `/proc/net` reports itself as blind in the output instead of proceeding as if the check had passed.
 
-**`stop` and `clear` had no protection at all, and that was the real hole.** The protected set is consulted only by `disable` and `uninstall`; `action=stop` went straight to `am force-stop`, and its default was `dry_run: false`, so a single call with no extra parameters would silently cut a live service. `pm clear` is worse than stop rather than milder — it stops the app *and* wipes its data, which on a remote service means the pairing. Both are now behind the guard, `clear` included: the specification named force-stop, and covering only that would have left the more destructive of the two open.
+### Changed
+- `stop` and `clear` are covered by a guard for the first time; they previously consulted nothing.
+- A listening socket on a shared uid is refused with the attribution stated as unproven, instead of being passed over.
+- `CHANGELOG.md` moved into `adb_mcp/` and `adb_mcp/DOCS.md` was added, so Home Assistant can show both from the add-on's own tabs.
 
-**Sockets on a shared uid are refused, not skipped.** A uid spread across several packages cannot be attributed to any one of them — that is what `net_unattributed` has recorded since 1.2.3. When such a uid is serving an external client and the target package belongs to it, the guard refuses and says plainly that the link is unproven. Passing over it quietly was the option that felt tidier and is exactly the gap being closed: it cannot be shown that this package holds the socket, and it equally cannot be shown that it does not, while the two mistakes cost very different amounts. The refusal is lifted by the same `force_network`, and it fires only when there is a live external connection, never on a merely listening shared uid.
+## 1.2.4 — 2026-08-09
 
-**`force_network` is its own flag, separate from `force`.** `force` exists to continue after a failed APK backup, so it is set while thinking about backups — and one flag covering both would have meant that deciding about a backup silently decided about cutting a live service too. Two unrelated risks, two deliberate answers.
+One fix found while accepting 1.2.3 on hardware.
 
-**The guard is checked before the protected set, and `force_network` does not reach past it.** Its refusal names the port and the live peer, which is far more useful than the membership-in-a-list message the protected set produces. If `force_network` is passed, a system package still stops at the protected set, which has no override — it only downgrades one refusal into the other. For the record: system packages holding a listening socket have been in the protected set since 1.1.2, so `disable` on the Shield remote service already refused; the guard adds the specific message, the two actions that had no cover, and the user-package and shared-uid cases.
-
-**Documentation moved into the add-on directory.** Home Assistant reads `CHANGELOG.md` and `DOCS.md` from the add-on folder, not from the repository root, so neither the changelog nor any documentation was reachable from the add-on's own tabs. `CHANGELOG.md` now lives in `adb_mcp/` (moved, not copied — a second copy at the root would drift), and a new `adb_mcp/DOCS.md` covers configuration, the tools and the safety model. `README.md` stays at the repository root, where GitHub looks for it.
-
-**A guard that could not read the device says so.** If `/proc/net` cannot be read, the state-changing call still reports `network_guard: СЛЕП` in its output instead of proceeding as if the check had passed. Verified readable from the shell on SDK 28, 30 and 31; the Android 10+ restrictions do not apply to uid 2000.
-
-## 1.2.4
-One fix, found while accepting 1.2.3 on hardware.
-
-**A launch is confirmed against the resumed activity, not the focused window.** After the explicit `am start` fallback, the tool checked `mCurrentFocus` to see whether the package had actually come up. On a Shield that field reads `null` even while the launcher is alive and resumed, so the check had nothing to compare and warned regardless. The resumed activity is now the primary witness, with `mCurrentFocus` kept as a second opinion for firmware that lacks the first.
-
-The wording of the warning was wrong too. It blamed timing — "the window may not have opened yet" — when the usual cause is the opposite: the activity started and closed itself. Setup wizards and placeholder screens check their condition and call `finish()` immediately, which is exactly what `com.nvidia.shield.welcome` does. The message now states what is on top instead of guessing why.
+- A launch is confirmed against the resumed activity, with `mCurrentFocus` kept as a second opinion; the old check warned on firmware that reports `mCurrentFocus=null` while the app is alive.
+- The warning states what is on top instead of blaming timing.
 
 ## 1.2.3
-Everything left open by v1.2.2, confirmed against live devices first — this round added a Galaxy S22 on Android 16 and a Galaxy Watch 6 on Wear OS 6 to the three TV boxes.
 
-**`action=launch` now finds activities it previously gave up on.** Launching a package by name turned out to be more awkward than one category covers. TV apps declare their MAIN activity under `LEANBACK_LAUNCHER` rather than `LAUNCHER`, so `monkey` refused and the fallback found nothing — `com.android.tv.settings` could not be launched at all. Some phone packages do the same. Others declare neither and resolve only to a bare `MAIN` query, which is the norm on Wear OS. The chain is now `monkey LAUNCHER`, `monkey LEANBACK_LAUNCHER`, then `resolve-activity` against `MAIN`+`LAUNCHER`, `MAIN`+`LEANBACK_LAUNCHER` and plain `MAIN`. When nothing resolves, the error lists every attempt rather than naming one guessed cause.
+Fixes from acceptance across five devices.
 
-**A resolved activity belonging to another package is now rejected.** `resolve-activity -a MAIN` returns `android/com.android.internal.app.ResolverActivity` — the system chooser, not the app — and on Android 16 it does so for almost every package that lacks a launcher category. It matches the `package/activity` shape, so the previous code would have started the chooser dialog and reported a launch. Any activity whose package differs from the one requested is discarded and the next query is tried.
-
-**A listening socket is no longer attributed to every package sharing a uid.** The network signal in `adb_app`'s protected set maps a socket's uid back to packages, but a uid is not a package: under a shared `sharedUserId` — `android.uid.system` above all — much of a firmware can sit together. On the watch, the ADB pairing daemon's socket belongs to uid 1000, which 38 packages share, and all 38 were reported as network listeners. The error was in the safe direction, since surplus packages merely became protected, but a signal meant to be specific stopped meaning anything. A uid spread across more than three packages, or owning no package at all, is now reported separately under `net_unattributed` instead of being pinned on a guess.
-
-**An absent subsystem reads differently from a failed probe.** `dumpsys webviewupdate` returns nothing on Wear OS because there is no WebView provider there, and the note said the source could not be determined — sending the reader to look for a fault that does not exist. An empty answer now says the subsystem is not present on this device.
-
-**XML entities are decoded in labels.** `uiautomator` returns XML, so newlines and reserved characters arrived escaped and were printed raw — `07:32&#10;New notifications` on the watch face, for one. Numeric forms are expanded too, and `&amp;` last, so an escaped entity is not expanded twice. This affects `adb_ui_dump` as well as the search.
-
-**Duplicate labels collapse in the remaining case.** The 1.2.2 de-duplication keyed on label plus resource-id, which still left a container with no id and its captioned child as two lines. Entries are now collapsed by label alone, keeping the variant that carries an id.
+### Fixed
+- `action=launch` tries `monkey` with `LAUNCHER` and `LEANBACK_LAUNCHER`, then `resolve-activity` against `MAIN` with each category and bare `MAIN`. When nothing resolves, the error lists every attempt.
+- A resolved activity belonging to another package — the system chooser — is discarded instead of being started and reported as a launch.
+- A listening socket is no longer attributed to every package sharing its uid; a uid spread across more than three packages, or owning none, is reported under `net_unattributed`.
+- An absent subsystem reads differently from a failed probe, so a device with no WebView provider no longer looks like a fault.
+- XML entities in `uiautomator` labels are decoded, so a newline no longer arrives as `&#10;`.
+- Duplicate labels collapse by label alone, keeping the variant that carries a resource-id.
 
 ## 1.2.2
-Follow-up to the 1.2.1 acceptance run, which added a fourth device to the fleet — a Samsung S20 FE (SDK 33, arm64-v8a, 480 dpi, and a real touchscreen). Two cosmetic consequences of the 1.2.1 label handling, and one correction to the record.
 
-**Duplicate labels are collapsed.** Since labels are now recovered from a node's children, a container and the label inside it produced two identical lines in the "visible now" list — three on deeper layouts. `Back, Back, X-plore, Donate, Donate` is noise, not information. Identical label plus resource-id is now listed once.
+Follow-up to the 1.2.1 acceptance run.
 
-**A container and its own label no longer count as two matches.** The same pairing also inflated the match count, so the tool asked for an `index` to choose between an element and its own caption — a choice with no meaning. When one match geometrically contains another and both resolve to the same label, the outer clickable node is kept: that is the one the DPAD walk would have aimed at anyway. Genuinely separate elements that happen to share a label are untouched and still require an `index`.
-
-### Correction to the 1.2.1 notes
-The 1.2.1 entry explained the `adb_app action=launch` defect by claiming X-plore does not declare the LAUNCHER category. That explanation was wrong: `pm dump` shows `MAIN` plus `android.intent.category.LAUNCHER` on its main activity, and `monkey` launches it normally. What was actually observed was a transient PackageManager state on Fire OS 7 in the first minutes after `install-multiple` — `cmd package resolve-activity` already answered while `monkey` did not yet. The same sequence on a Samsung running SDK 33 launches immediately, so this is firmware behaviour rather than a general rule.
-
-The fix itself is unaffected and stands: a launch is confirmed by `Events injected` rather than assumed, whatever the reason `monkey` declines. Note that the `resolve-activity` fallback has still not executed on real hardware — the failure no longer reproduces.
+- Duplicate labels in the "visible now" list are collapsed to one entry.
+- A container and the label inside it no longer count as two matches, so `index` is not demanded where there is nothing to choose between.
 
 ## 1.2.1
-Fixes found by the 1.2.0 acceptance run on three live devices (Fire TV SDK 28, Shield SDK 30, TiVo SDK 31). The `.apks` feature passed that run unchanged; everything below is `adb_find_and_tap`, plus one older `adb_app` defect the same session exposed.
 
-**`text` now matches content-desc as well, not just the text attribute.** On the Fire TV launcher every label lives in `content-desc` and `text` is empty, so `text="Find"` returned "element not found" — while the very same error listed `Find` among the visible elements, because that list was built from `text || content-desc`. The tool searched one set of fields and reported another. On Google TV launchers (Shield, TiVo) the labels are real `text`, so testing only there would have shown nothing wrong. `desc` stays narrow and matches content-desc only.
+Fixes from the 1.2.0 acceptance run on three live devices.
 
-**An unfocusable label is retargeted to the element that actually takes focus.** TV launchers put the app name in a non-focusable `banner_image` inside a focusable `view_app_card`; walking towards the label itself could never arrive. The target is now raised to the smallest clickable node containing the match.
-
-**Nodes without text are told apart.** Node identity was `resource-id|text|content-desc`, which is identical for every app card on a launcher screen — the walk could aim at the wrong one. Identity now includes the label recovered from the enclosing node's children.
-
-**Cycling focus is detected.** The previous check only caught focus that stopped dead. When a target cannot be reached, the walk typically ping-pongs between two neighbours (`UP LEFT RIGHT LEFT RIGHT LEFT` was observed), which looked like progress and burned every step. Visited nodes are now remembered and a repeat aborts with a report.
-
-**The walk is bounded by time, not just steps.** Each step re-dumps the UI (~1.5-2s), so the old default of 20 steps could outlast the MCP client's timeout: the tool ran to completion and the caller saw a transport error instead of the report. Default is now 12 steps with an internal ~25s budget that stops early and explains where it got to.
-
-**Failure reports name the element.** When focus sat on a container with no text of its own, reports read `now focused: ""`, losing the one detail they exist to convey.
-
-**`adb_app action=launch` no longer claims success when nothing started.** `monkey -c android.intent.category.LAUNCHER` can exit 251 and inject nothing while printing only a harmless SYS_KEYS line, which was being reported as a launch. (The cause originally described here was wrong; see the correction under 1.2.2.) Success is now determined by `Events injected`, with a fallback that resolves the main activity via `cmd package resolve-activity` and starts it explicitly, then confirms against the focused window.
-
-**An ABI refusal names the ABI that was actually asked for.** Forcing `abi=` produced a message listing the *device's* ABIs and then contradicting itself by showing one of them as present in the bundle.
+### Fixed
+- `text` is matched against `content-desc` as well as the `text` attribute, so a label that exists only in `content-desc` is findable.
+- A non-focusable label is raised to the smallest clickable node containing it, which is the node the DPAD walk can actually reach.
+- Node identity includes the label recovered from child nodes, so app cards with no text of their own are told apart.
+- Cycling focus is detected and aborts with a report; previously only a fully stopped focus was caught.
+- The DPAD walk is bounded by an internal ~25 s budget as well as `max_steps`, whose default drops from 20 to 12.
+- Failure reports name the focused element instead of an empty string.
+- `adb_app action=launch` confirms a launch by `Events injected`, with a `resolve-activity` fallback that starts the main activity explicitly.
+- An ABI refusal names the ABI that was actually requested.
 
 ## 1.2.0
-Two features that were blocked until the 1.1.1 property fixes landed — split selection reads the device locale and density, and both were wrong before.
 
-**`.apks` bundle install.** `adb_install` now accepts a single `.apks` / `.xapk` / `.apkm` bundle and picks the splits from the device's actual ABI list, screen density and locale. The prompt for this was the Fire TV rebuild after the July factory reset, where X-plore had to go in by hand through `pm install-create` / `install-write` / `install-commit` because `adb install` rejects a bundle and Fire OS 7 has no `unzip` to unpack one on the device. Unpacking happens add-on side instead, so the device needs nothing.
+Two features unblocked by the 1.1.1 property fixes. Tools 17 -> 18.
 
-- **The ZIP reader is written against `zlib`, not shelled out to `unzip`.** The container installs only nodejs, android-tools and imagemagick — there is no `unzip` in it. Alpine's busybox has an applet, but relying on that is a guess and adding a package for one operation is worse; a `.apks` is an ordinary ZIP and Node already ships `zlib`. No new dependency. Verified byte-for-byte against a reference implementation on deflate, stored, and archives with a trailing comment.
-- **Three naming conventions are supported, not one.** bundletool writes `splits/base-master.apk` and `base-arm64_v8a.apk`; APKMirror-style bundles use `<package>.apk` plus `config.arm64_v8a.apk`; pulling an installed app off a device gives `base.apk` plus `split_config.arm64_v8a.apk`. Supporting only the convention the code was written against would mean it works on exactly the bundles used to test it.
-- **A wrong ABI is refused; a wrong density is not.** An ABI mismatch leaves an app that will not start, so a bundle with no split for any of the device's ABIs is an error and nothing is installed. Density splits fail softly — resources fall back to the base APK — which is not a guess: on the Fire TV, X-plore is running right now with a `tvdpi` split on an `xhdpi` device. The nearest bucket is used and the mismatch is reported.
-- Language splits follow the device locale, with a `locales` argument to add more (useful when the system language and the user's language differ). `dry_run` reports the selection without installing.
-
-**`adb_find_and_tap`.** Finds an element by text, resource-id or content-desc and activates it in one call.
-
-The interesting part is how it activates. A coordinate tap on a TV box does not land where the coordinates point — it activates whatever currently holds focus, so the tap silently does the wrong thing. That behaviour was recorded as a Fire TV quirk; checking `pm list features` on all three boxes showed it is not device-specific at all: **none of them reports `android.hardware.touchscreen`**, they are all `leanback_only`. So the mode is derived from the feature list rather than from a model name: with a touchscreen, tap the element centre; without one, walk the focus to the element with DPAD keys and press DPAD_CENTER.
-
-Nothing is assumed to have worked. The UI is re-dumped after every key press and the focus is re-checked; the target is re-located each step because scrolling moves it. If the focus stops responding on both axes, or the target is not reached within `max_steps`, the tool says exactly where it stopped and presses **nothing** — a silent miss on someone's television is a worse outcome than a clear refusal.
+### Added
+- New tool `adb_find_and_tap`: finds an element by text, resource-id or content-desc and activates it. The method is read from `pm list features` — tap with a touchscreen, walk the focus with DPAD keys without one.
+- `adb_find_and_tap` re-dumps the UI after every key and presses nothing when the focus stalls or the target is not reached within `max_steps`.
+- `adb_install` accepts a single `.apks`/`.xapk`/`.apkm` bundle and picks splits from the device ABI list, screen density and locale. The bundle is unpacked add-on side with Node's own `zlib`, so the device needs nothing.
+- Three split naming conventions are recognised: bundletool, APKMirror-style and device-pulled.
+- No matching ABI split is a refusal; a density mismatch uses the nearest bucket and is reported. `locales` adds language splits, `dry_run` reports the selection without installing.
 
 ## 1.1.2
-Two new **derived** signals for the protected set, replacing what would otherwise have been a hardcoded package name.
 
-The prompt for this was a hole left over from 1.1.1: reading role holders from `dumpsys role` protects the Google TV remote service on Android 12, but the `SYSTEM_TELEVISION_REMOTE_SERVICE` role does not exist before SDK 31 — so on an Android 11 box the very same package sits unprotected. Adding that one package to the core list would have fixed exactly one device and left every other vendor's equivalent exposed. The generalisation comes from restating the problem: **a latent failure is a failure visible only from outside the device**, and the canary only ever looks inward. So the thing worth detecting is external coupling.
+Two derived signals added to the protected set. No GitHub release; a staging build.
 
-- **`net_listener`** — packages holding a listening TCP socket, read from `/proc/net/tcp` and `/proc/net/tcp6` with uid mapped to package via `pm list packages -U`. A listening socket is direct evidence that a package serves something beyond itself, and it requires no knowledge of the vendor or of any package name. One distinction carries the whole signal: an ESTABLISHED row with a high local port is an *outbound* connection and means nothing — any VPN client or video player produces dozens. Only LISTEN counts, and an inbound connection to a listening port from a non-loopback peer escalates it to "currently serving an off-device client". Verified readable from the shell on SDK 28, 30 and 31; the Android 10+ restrictions on `/proc/net` do not apply to uid 2000.
-- **`authenticator`** — packages that actually register an account authenticator, parsed from the `AuthenticatorDescription {type=...}, ComponentInfo{package/...}` lines of `dumpsys account`. This is derivation in place of guessing: the previous account-stack detection matched package names against a list of regexes, which is the same hardcoding in a different shape. The name-based heuristic is kept, but demoted to a supplementary source — it still catches support libraries that register no authenticator of their own.
+### Added
+- `net_listener` — packages holding a listening TCP socket, read from `/proc/net/tcp` and `/proc/net/tcp6` with uid mapped to package via `pm list packages -U`.
+- `authenticator` — packages that register an account authenticator, parsed from the `AuthenticatorDescription` lines of `dumpsys account`.
 
-**Protect or warn is decided by reversibility, not by importance.** A *system* package carrying either signal goes into the protected set: it is hard to restore and its loss is hard to notice. A *user* package carrying the same signal produces a warning in the plan instead of a refusal, because the add-on can back up and reinstall its APK. Without that line the socket signal would make every torrent server and VPN client undisableable, and the authenticator signal would do the same to file managers, which register authenticators too. Warnings appear in the `dry_run` plan per package, and in the report when a run proceeds.
-
-No GitHub release is cut for this version either; it is a staging build on the way to the next feature release.
+### Changed
+- Protect or warn is decided by reversibility: a system package carrying either signal joins the protected set, a user package produces a warning in the plan instead of a refusal.
+- The name-based account heuristic is demoted to a supplementary source.
 
 ## 1.1.1
-Acceptance of 1.1.0 on the three live devices (Fire TV / SDK 28, Shield / SDK 30, TiVo / SDK 31) found four defects. Two of them were in the protected set itself, and both failed **silently** — which is the part that matters. 1.1.0 had only ever been exercised against a stubbed `adb`, and a stub cannot tell you that a real command does not exist.
 
-- **Role tier never worked, on any device.** `cmd role get-role-holders` does not exist: the role service has `add-role-holder`, `remove-role-holder` and `clear-role-holders`, but **no getter at all**. The tier was designed around a command that was never there, and because the output filter discarded `Unknown command: ...` as "not a package name", the failure looked exactly like "this platform has no roles". Role holders are now read from `dumpsys role`. Concretely, this closes a live hole: `com.google.android.tv.remote.service` (role `SYSTEM_TELEVISION_REMOTE_SERVICE`) was not protected, and disabling it would have silently killed the `androidtv_remote` integration for both Google TV boxes — a failure the account canary cannot see, because the Google accounts stay right where they are.
-- **Package installer was never derived on Android 10+.** `resolve-activity` was called with `-d file:///x.apk`, which SDK 29+ refuses to resolve for an install intent. Worse than the miss: the literal reply `No activity found` was inserted into the protected package list as if it were a package name, because the result was not validated. Resolution now tries `content://` first and falls back to `file://` for older builds, and **every** derived source is checked against a package-name pattern before it is trusted.
-- **A source that fails to answer now always leaves a note.** Previously a failed probe and a genuinely absent platform feature produced the same (empty) output, so a gap in the protection was invisible in the result. "No role service on this platform (SDK < 29)" and "`dumpsys role` failed, ROLES NOT COVERED" are now different, and loud.
-- **`locale` was garbage on Fire OS 7.** `ro.product.locale` is empty there, and the marker-based output parser had a greedy-whitespace bug that made the field swallow the *next* marker — the reported locale was the literal string `#model`. Property output is now split on markers so an empty value is unambiguous, the locale is taken from a fallback chain (`persist.sys.locale` first, since that is the locale apps actually run in) and validated as BCP-47. This was a blocker for split selection, not a cosmetic issue.
-- **Screen density is now read unambiguously.** `wm density` prints a physical density and, when set, an override; the old parser took the last line and so could not tell them apart. Both are captured, the override wins when present, and a mismatch is reported.
-- **`versionName` was always empty** — in `action=info`, in `backup` output, and in `manifest.json`, which is the one document a deleted app is restored from. Cause: `grep -m2` stopped after two matching lines, and `primaryCpuAbi=` and `versionCode=` come first in `dumpsys package`, so the name was cut off before it appeared.
-- `manifest.json` now records the device ABI list alongside model, SDK, density and locale.
+Acceptance of 1.1.0 on three live devices found six defects, two of them silent. No GitHub release; a staging build.
 
-No GitHub release is cut for this version; it is a staging build on the way to the next feature release.
+### Fixed
+- Role holders are read from `dumpsys role`. `cmd role get-role-holders` does not exist, so the role tier had never worked on any device, and its failure looked exactly like a platform without roles.
+- The package installer is resolved with `content://` first and `file://` as a fallback, and every derived source is validated against a package-name pattern before it is trusted.
+- A source that fails to answer always leaves a note, so an absent platform feature and a failed probe are no longer indistinguishable.
+- `locale` is parsed on markers and validated as BCP-47, with a fallback chain starting at `persist.sys.locale`; it previously came back as the literal string `#model` on firmware with an empty `ro.product.locale`.
+- Physical and override screen density are captured separately, the override wins when present, and a mismatch is reported.
+- `versionName` is no longer empty in `action=info`, in `backup` output and in `manifest.json`.
 
-## 1.1.0
-- **New tool `adb_app` — package operations with guard rails.** Actions: `list`, `info`, `protected`, `launch`, `stop`, `clear`, `disable`, `uninstall`, `enable`, `restore`, `backup`, `state`. It exists because debloating a Fire TV by hand through `adb_shell` cost one device: 22 packages were disabled from a public "safe list", the box silently lost its Amazon account registration, re-login hung hard, and only a factory reset brought it back
-- The **protected set is derived from the device**, not hardcoded: current launcher and package installer (`cmd package resolve-activity`), active IME (`settings get secure default_input_method`), WebView provider (`dumpsys webviewupdate`), role holders where the OS has them, plus account/registration packages. Any overlap with the requested list **aborts the entire call** — no partial application. On the Fire TV that broke, this set automatically covers `com.amazon.tv.ottssocompanionapp`, the OTT single-sign-on package that a name-based safe list would never flag
-- **Account canary between batches.** Losing device registration is a *latent* failure: the system still boots and apps still run, so a reboot check says everything is fine. `adb_app` snapshots the account count (`dumpsys account`, counts and types only — never account names) before starting and re-checks it after every batch, together with launcher resolution. A drop rolls the batch back and stops
-- **Snapshot on the HA filesystem** (`/media/adb-mcp/<device>/state.json` by default, `store` overrides): everything applied is recorded, so `action=restore` undoes it in one call. `disable-user` was always reversible in principle — what was missing in July was a list to reverse *from*
-- **APK backup** (`action=backup`, and automatically before `uninstall`): `pm path` → pull every split → `<store>/<device>/apk/<pkg>/<versionCode>/` with a `manifest.json`. Without a store account you cannot re-download anything, so a local copy is the only way back. Restore reuses `install-multiple`
-- `mode=uninstall` is available but gated three ways: the new addon option `allow_uninstall` (default `false`), an explicit `mode` in the call, and a successful APK backup (`force` to override). System packages removed with `--user 0` come back via `cmd package install-existing`; sideloaded ones only from the backup
-- Everything that changes state defaults to `dry_run: true` and returns the full plan, including which packages are protected and why
-- **Server split into modules** (`adb`, `device`, `session`, `ui`, `files`, `apps`, `registry`), `server.js` is now transport only. Done before the new features rather than after — the 700-line monolith would have survived one more tool, not three
-- Build guard extended: `toolchain-check.sh` now verifies every module is present in the image, parses, and that the whole `require` graph loads with a non-empty tool registry. Files are copied into the image one by one, so a forgotten `COPY` line would otherwise produce an image that builds cleanly and dies at runtime
+### Added
+- `manifest.json` records the device ABI list alongside model, SDK, density and locale.
 
-## 1.0.0
-- **First stable release.** No code changes over 0.5.1 — the bump marks the end of the soak programme that started at 0.3.2
-- Memory: the screenshot leak found in 0.3.2 (~3.1 MB retained per frame, ratchet pattern) was fixed in 0.3.6 by moving the pipeline to file→file, and has now been re-verified on 0.5.1. Final gate: 3 series × 8 `adb_screenshot` (320 px / q30) with 10 min idle after the first series — RSS 32.5 → 34.5 MB, per-series deltas decaying +1.41 → +0.40 → +0.14 MB. That is a plateau, not a ratchet; the same 24 frames on 0.3.2 would have added roughly 75 MB. CPU returned to 0.0 at every measurement
-- aarch64 is now **confirmed**, not best-effort: an external tester built and ran the addon on a Raspberry Pi 4 (HAOS bare metal) — clean build, clean start, all three screenshot-pipeline smokes pass. ADB tools themselves remain untested on ARM (no Android device on that setup)
-- README: added "Why not the official MCP Server integration?", a known-limitations section, split-APK usage, and an explicit warning about irreversible ADB operations. `LICENSE` file added (MIT — the README already claimed it)
+## 1.1.0 — 2026-08-07
 
-## 0.5.1
-- `adb_install`: fixed `install-multiple` being unreachable from web and desktop MCP clients. Those clients serialize array parameters as JSON strings, and the handler only checked `Array.isArray()`, so the whole array arrived as a single string and failed path validation with `Access denied (host path outside /media, /share)`. Arrays are now coerced (array → as-is, `"[...]"` → parsed, anything else → single-element). Same class of bug as ha-filesystem-mcp issue #2
-- `INSTALL_FAILED_VERIFICATION_FAILURE` now carries a hint: the on-device package verifier rejects ADB installs, disable it once with `settings put global verifier_verify_adb_installs 0`. Seen on certified Android TV devices with Play Services; devices without Play Protect (e.g. Fire OS) are unaffected regardless of the setting
+New tool `adb_app`, and the server split into modules. Tools 16 -> 17.
+
+### Added
+- New tool `adb_app` with actions `list`, `info`, `protected`, `launch`, `stop`, `clear`, `disable`, `uninstall`, `enable`, `restore`, `backup`, `state`.
+- The protected set is derived from the device — launcher, package installer, active IME, WebView provider, role holders, account packages — and any overlap aborts the whole call.
+- An account canary between batches re-checks the account count and launcher resolution; a drop rolls that batch back and stops.
+- A snapshot on the HA filesystem records everything applied, so `action=restore` undoes it in one call.
+- APK backup pulls every split plus a `manifest.json`; restore reuses `install-multiple`.
+- `mode=uninstall` is gated three ways: the new `allow_uninstall` option (default `false`), an explicit `mode` in the call, and a successful APK backup.
+- Everything that changes state defaults to `dry_run: true` and returns the full plan, including which packages are protected and why.
+
+### Changed
+- The server is split into modules (`adb`, `device`, `session`, `ui`, `files`, `apps`, `registry`); `server.js` is transport only.
+- `toolchain-check.sh` verifies that every module is present in the image, parses, and that the whole `require` graph loads with a non-empty tool registry.
+
+## 1.0.0 — 2026-07-28
+
+First stable release. No code changes over 0.5.1.
+
+### Added
+- `LICENSE` file (MIT).
+- README sections on the official MCP Server integration, known limitations, split-APK usage, and an explicit warning about irreversible ADB operations.
+
+## 0.5.1 — 2026-07-28
+
+### Fixed
+- `install-multiple` was unreachable from MCP clients that serialise array parameters as JSON strings: the whole array arrived as one string and failed path validation. Arrays are now coerced.
+- `INSTALL_FAILED_VERIFICATION_FAILURE` carries the setting that fixes it.
 
 ## 0.5.0
-- `adb_install`: `apk_path` accepts an **array** of paths → `adb install-multiple`, i.e. atomic installation of split APKs (base + `config.*`). Restoring an app after a factory reset becomes `pm path <pkg>` → `adb_pull` → pass the set back as an array. Choosing the right splits by ABI (`ro.product.cpu.abilist`) and density (`wm density`) is up to the caller — no bundletool in the container
-- A single path string keeps working exactly as before (`adb install`)
+
+### Added
+- `adb_install`: `apk_path` accepts an array of paths and installs split APKs atomically via `install-multiple`. A single path string behaves exactly as before. Choosing the right splits is up to the caller.
 
 ## 0.4.1
-- Dropped `armv7` from supported architectures — Home Assistant Supervisor has deprecated it (`App config 'arch' uses deprecated values ['armv7']` warning on every install). No functional changes
+
+### Changed
+- `armv7` dropped from the supported architectures after Supervisor deprecated it. No functional changes.
 
 ## 0.4.0
-- Base image migrated to the arch-less multi-arch manifest `ghcr.io/home-assistant/base:3.22` (was `${BUILD_ARCH}-base:3.21`, which is out of the docker-base support window). No `BUILD_ARCH` substitution: buildx resolves the manifest by `--platform`, so a wrong default can no longer silently pull an amd64 base on ARM
-- Toolchain on 3.22 (verified against aports): nodejs 22.23.0, android-tools 35.0.2, ImageMagick 7.1.2.15. Same majors — build-time guard and screenshot-pipeline smoke unchanged
-- No code changes; the screenshot pipeline remains file→file only
 
-## 0.3.2
-- `adb_logcat` substring mode: fixed false matches on Fire OS — Amazon ships BSD grep 2.5.1-FreeBSD as `/system/bin/grep`, which matches *every* line after binary bytes in the logcat crash buffer (`-a` and `LC_ALL=C` don't help). The filter now prefers `toybox grep` when available (stock Android grep *is* toybox — no behavior change there)
-- `adb_logcat` substring mode: zero matches now return `(empty)` instead of an error
-- adb wrapper: stdout is no longer discarded on non-zero exit — shell pipeline failures now show the command output in the error message
+### Changed
+- Base image moved to the arch-less multi-arch manifest `ghcr.io/home-assistant/base:3.22`, so a wrong default can no longer pull an amd64 base on ARM.
+- Toolchain on 3.22: nodejs 22.23.0, android-tools 35.0.2, ImageMagick 7.1.2.15. Same majors, so the build-time guard and the screenshot smoke are unchanged.
 
-## 0.3.1
-- Common adb errors (`device not found`, `device offline`, `unauthorized`) now carry actionable hints
-- `adb_connect` failures (`failed to connect`, host unreachable) raise a proper error instead of returning success text
-- README rewritten for the full 16-tool set; CHANGELOG added
+## 0.3.8 — 2026-07-21
 
-## 0.3.0
-- `adb_text`: Unicode input (Cyrillic/emoji/CJK) via ADBKeyBoard — automatic IME switch and restore, clear error with setup instructions when the keyboard is missing
-- `adb_screenshot`: defaults tightened to 1024px / quality 70; new optional `max_px` and `quality` parameters
+No release notes were kept for this version.
 
-## 0.2.2
-- `adb_logcat`: filtering, grep and tail moved **on-device** — fixes host-side `maxBuffer` overflow on large buffers; filterspec auto-appends `*:S`; substring mode implemented (case-insensitive)
-- Tool-call logging under the existing `log_requests` flag (tool name, args, duration, response size / error)
+## 0.3.7 — 2026-07-21
 
-## 0.2.1
-- `adb_logcat`: fixed broken `filter` (was windowing the raw buffer before filtering; substring mode was a no-op)
-- `adb_ui_dump`: stale uiautomator cache detected via dump hash, auto-retry after 600 ms; uiautomator errors no longer swallowed
-- `adb_install`: `-t` flag — testOnly/debug builds install
-- `adb_push` / `adb_pull`: transfer stats returned (adb writes them to stderr without a TTY)
-- `run.sh` banner no longer hardcodes the version
+No release notes were kept for this version.
 
-## 0.2.0
-- `adb_pair` tool for Android 11+ Wireless Debugging (pairing code)
-- Fixed stale VERSION banner
+## 0.3.6 — 2026-07-21
+
+The screenshot pipeline moves to file-to-file, ending the 0.3.3-0.3.5 breakage.
+
+### Fixed
+- The screenshot pipeline is `adb exec-out > tmp`, then ImageMagick file to file, then `cat`. It replaces the `adb exec-out | magick png:- ... jpg:-` form that broke 0.3.3-0.3.5.
+- Buffering the PNG in Node leaked roughly 3 MB per frame, found in a soak run over 19-21 July.
+
+## 0.3.5 — 2026-07-21
+
+⚠️ Broken release: one of three consecutive releases broken in production on this date.
+
+- The streaming ImageMagick form (`adb exec-out | magick png:- ... jpg:-`) silently returned 0 bytes with exit code 0 on the production image; the failure came from the behaviour of external utilities, not from the code.
+- Toolchain versions were recorded nowhere, so the failure could not be diagnosed from the log.
+- Fixed in 0.3.6.
+
+## 0.3.4 — 2026-07-21
+
+⚠️ Broken release: one of three consecutive releases broken in production on this date.
+
+- The streaming ImageMagick form (`adb exec-out | magick png:- ... jpg:-`) silently returned 0 bytes with exit code 0 on the production image; the failure came from the behaviour of external utilities, not from the code.
+- Toolchain versions were recorded nowhere, so the failure could not be diagnosed from the log.
+- Fixed in 0.3.6.
+
+## 0.3.3 — 2026-07-21
+
+⚠️ Broken release: one of three consecutive releases broken in production on this date.
+
+- The streaming ImageMagick form (`adb exec-out | magick png:- ... jpg:-`) silently returned 0 bytes with exit code 0 on the production image; the failure came from the behaviour of external utilities, not from the code.
+- Toolchain versions were recorded nowhere, so the failure could not be diagnosed from the log.
+- Fixed in 0.3.6.
+
+## 0.3.2 — 2026-07-19
+
+### Fixed
+- `adb_logcat` substring mode matched every line after binary bytes in the crash buffer on firmware shipping BSD grep as `/system/bin/grep`; `toybox grep` is preferred when available.
+- `adb_logcat` substring mode returns `(empty)` on zero matches instead of an error.
+- The adb wrapper no longer discards stdout on a non-zero exit, so a failed shell pipeline shows the command output in the error message.
+
+## 0.3.1 — 2026-07-19
+
+### Changed
+- Common adb errors (`device not found`, `device offline`, `unauthorized`) carry the action that fixes them.
+- `adb_connect` failures raise an error instead of returning success text.
+- README rewritten to cover the whole tool set; `CHANGELOG.md` added.
+
+## 0.3.0 — 2026-07-19
+
+### Added
+- `adb_text`: Unicode input (Cyrillic, emoji, CJK) via ADBKeyBoard, with an automatic IME switch and restore and a setup error when the keyboard is missing.
+- `adb_screenshot`: optional `max_px` and `quality` parameters.
+
+### Changed
+- `adb_screenshot` defaults tightened to 1024 px and quality 70.
+
+## 0.2.2 — 2026-07-18
+
+### Changed
+- `adb_logcat` filtering, grep and tail moved on-device, fixing host-side `maxBuffer` overflow on large buffers. Filterspec auto-appends `*:S`; substring mode is case-insensitive.
+
+### Added
+- Tool-call logging under the existing `log_requests` flag: tool name, arguments, duration, response size or error.
+
+## 0.2.1 — 2026-07-18
+
+### Fixed
+- `adb_logcat`: `filter` windowed the raw buffer before filtering, and substring mode did nothing.
+- `adb_ui_dump`: a stale `uiautomator` cache is detected by dump hash and retried after 600 ms; `uiautomator` errors are no longer swallowed.
+- `run.sh` no longer hardcodes the version in its banner.
+
+### Added
+- `adb_install`: `-t` flag, so testOnly and debug builds install.
+- `adb_push` and `adb_pull` return transfer statistics.
+
+## 0.2.0 — 2026-07-18
+
+Pairing support for Android 11+.
+
+### Added
+- `adb_pair` for Wireless Debugging with a pairing code.
+
+### Fixed
+- Stale VERSION banner.
 
 ## 0.1.1
-- Fixed adb server startup (`adb -a server nodaemon` instead of `ADB_SERVER_SOCKET`)
+
+- adb server startup uses `adb -a server nodaemon` instead of `ADB_SERVER_SOCKET`.
 
 ## 0.1.0
-- Initial release: 13 ADB tools, MCP Streamable HTTP, auth proxy
+
+First release: the initial ADB tool set, MCP Streamable HTTP transport, auth proxy.

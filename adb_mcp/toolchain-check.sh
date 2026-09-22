@@ -42,19 +42,19 @@ major() { echo "$1" | sed 's/[.-].*//'; }
 guard() {
   rc=0
   if [ "$(major "$NODE_V")" != "$EXPECT_NODE_MAJOR" ]; then
-    echo "TOOLCHAIN GUARD: nodejs $NODE_V, ожидался мажор $EXPECT_NODE_MAJOR" >&2; rc=1
+    echo "TOOLCHAIN GUARD: nodejs $NODE_V, expected major $EXPECT_NODE_MAJOR" >&2; rc=1
   fi
   if [ "$(major "$IM_V")" != "$EXPECT_IM_MAJOR" ]; then
-    echo "TOOLCHAIN GUARD: ImageMagick $IM_V, ожидался мажор $EXPECT_IM_MAJOR" >&2; rc=1
+    echo "TOOLCHAIN GUARD: ImageMagick $IM_V, expected major $EXPECT_IM_MAJOR" >&2; rc=1
   fi
   if [ "$(major "$ADB_V")" != "$EXPECT_ADB_MAJOR" ]; then
-    echo "TOOLCHAIN GUARD: android-tools $ADB_V, ожидался мажор $EXPECT_ADB_MAJOR" >&2; rc=1
+    echo "TOOLCHAIN GUARD: android-tools $ADB_V, expected major $EXPECT_ADB_MAJOR" >&2; rc=1
   fi
   if [ "$rc" != 0 ]; then
     echo "" >&2
-    echo "Сборка остановлена: Alpine отдал не тот тулчейн, на котором аддон" >&2
-    echo "проверен. Прогони adb_screenshot вручную, убедись что всё работает," >&2
-    echo "и обнови EXPECT_*_MAJOR в toolchain-check.sh." >&2
+    echo "Build stopped: Alpine shipped a toolchain the add-on was not verified" >&2
+    echo "against. Run adb_screenshot by hand, confirm it works, then update" >&2
+    echo "EXPECT_*_MAJOR in toolchain-check.sh." >&2
     exit 1
   fi
 }
@@ -65,22 +65,22 @@ guard() {
 modules_guard() {
   for m in $MODULES; do
     if [ ! -f "/$m" ]; then
-      echo "MODULE GUARD: /$m отсутствует в образе — забыта строка COPY в Dockerfile" >&2
+      echo "MODULE GUARD: /$m is missing from the image - a COPY line in Dockerfile was forgotten" >&2
       exit 1
     fi
     if ! node --check "/$m" >/dev/null 2>&1; then
-      echo "MODULE GUARD: синтаксическая ошибка в /$m" >&2
+      echo "MODULE GUARD: syntax error in /$m" >&2
       node --check "/$m" >&2 || true
       exit 1
     fi
   done
   TOOL_COUNT=$(node -e 'process.stdout.write(String(require("/registry.js").TOOLS.length))' 2>/dev/null) || {
-    echo "MODULE GUARD: /registry.js не импортируется — сломан граф require" >&2
+    echo "MODULE GUARD: /registry.js does not import - the require graph is broken" >&2
     node -e 'require("/registry.js")' >&2 || true
     exit 1
   }
   if [ -z "$TOOL_COUNT" ] || [ "$TOOL_COUNT" -lt 1 ] 2>/dev/null; then
-    echo "MODULE GUARD: реестр инструментов пуст" >&2
+    echo "MODULE GUARD: the tool registry is empty" >&2
     exit 1
   fi
 }
@@ -93,9 +93,9 @@ smoke() {
 
   "$IM" -size 200x120 gradient:blue-black "$T/s.png"
   "$IM" "$T/s.png" -resize '64x64>' -quality 30 "$T/s.jpg"
-  [ -s "$T/s.jpg" ] || { echo "SMOKE FAIL: file->file дал пустой JPEG" >&2; exit 1; }
+  [ -s "$T/s.jpg" ] || { echo "SMOKE FAIL: file->file produced an empty JPEG" >&2; exit 1; }
   head -c 2 "$T/s.jpg" | od -An -tx1 | tr -d ' \n' | grep -qi 'ffd8' \
-    || { echo "SMOKE FAIL: file->file дал не JPEG" >&2; exit 1; }
+    || { echo "SMOKE FAIL: file->file produced something that is not a JPEG" >&2; exit 1; }
 
   # Стрим-режим (png:- -> jpg:-) НЕ используется в коде: на боевом образе он
   # молча отдавал 0 байт с exit 0 (0.3.3-0.3.5). Проверяем справочно, чтобы
@@ -133,7 +133,7 @@ geometry_check() {
     CMD=$(node -e "
       const ui = require('/ui.js');
       process.stdout.write(ui.buildImagePipeline('$T2/$name.png', '$T2/$name.jpg', 1024, 70));
-    ") || { echo "SMOKE FAIL: buildImagePipeline не отработал в node ($name)" >&2; exit 1; }
+    ") || { echo "SMOKE FAIL: buildImagePipeline failed in node ($name)" >&2; exit 1; }
     IM="$IM" sh -c "$CMD" 2>"$T2/$name.geom" \
       || { echo "SMOKE FAIL: screenshot-geometry pipeline ($name, im=$IM) exit $?" >&2; cat "$T2/$name.geom" >&2; exit 1; }
   done

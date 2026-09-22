@@ -1,241 +1,47 @@
 # ADB MCP Server — Home Assistant App (Add-on)
 
-MCP (Model Context Protocol) server for controlling Android devices over **network ADB**, packaged as a Home Assistant app. Lets AI assistants (claude.ai custom connectors, Claude Desktop, etc.) see and control Android TVs, Fire TVs, phones, tablets and watches on your LAN: run shell commands, take screenshots, inspect and tap UI, type text (incl. Unicode), install apps, transfer files, read logcat.
+MCP (Model Context Protocol) server for controlling Android devices over **network ADB**, packaged as a Home Assistant app. It lets AI assistants — claude.ai custom connectors, Claude Desktop and other MCP clients — see and control Android TVs, Fire TVs, phones, tablets and watches on your LAN: run shell commands, take screenshots, inspect and tap the UI, type text including Unicode, install apps, transfer files and read logcat.
 
-Transport: MCP Streamable HTTP (`POST /mcp`, plain JSON responses — immune to SSE buffering in CDNs/tunnels). Auth: secret path prefix `/private_<token>`, same pattern as [ha-filesystem-mcp](https://github.com/st412m/ha-filesystem-mcp).
+Transport is MCP Streamable HTTP (`POST /mcp`, plain JSON responses, immune to SSE buffering in CDNs and tunnels). Authentication is a secret path prefix, `/private_<token>`, the same pattern as [ha-filesystem-mcp](https://github.com/st412m/ha-filesystem-mcp).
 
-**Platforms:** built for `amd64` and `aarch64`. Developed and battle-tested on amd64 (HAOS). aarch64 has been confirmed by an external tester on a Raspberry Pi 4 (HAOS bare metal): clean build, clean start, all screenshot-pipeline smokes pass — though the ADB tools themselves were not exercised there (no Android device on that setup). `armv7` was dropped in 0.4.1 after Supervisor deprecated it.
+Home Assistant ships its own MCP Server integration, which does a different job: it exposes the HA conversation agent and the intents an assistant already understands. It gives no shell, no screen and no package manager. This app works below the level where entities exist and talks to Android over ADB directly. If what you want is an entity, use the official integration; if what you want is a terminal and a screen, use this.
 
-> ⚠ **ADB is not a sandbox.** Several operations exposed here are destructive and some are irreversible without a factory reset — `adb_uninstall` removes app data, `pm disable-user`/`pm uninstall --user 0` on system packages can leave a device in a broken or unbootable state, and an AI assistant will execute what it is asked to. Start with `allow_shell: false` if you only need screenshots and UI control, and keep a way to recover each device.
+## Requirements
 
-## Why not the official MCP Server integration?
-
-Home Assistant ships its own MCP Server integration, and it is the right tool for a different job. It exposes the **HA conversation agent** — the intents your assistant already understands (turn on a light, set a temperature). It does not give an assistant a shell, a screen, or a package manager on a device.
-
-This app is at a different layer. It talks to Android over ADB directly, so the assistant can do the things HA has no entity for: read a crash log, dump the current UI tree and tap a coordinate, sideload an APK, disable a preinstalled package, pull a file off the box. If your device happens to be an Android TV that HA already tracks via the `androidtv` integration, the two coexist (see below) — this app simply operates below the level where entities exist.
-
-Rule of thumb: if what you want is an entity, use the official integration. If what you want is a terminal and a screen, use this.
-
-## Tools (18)
-
-| Tool | Purpose | Notes |
-|---|---|---|
-| `adb_devices` | List connected devices | |
-| `adb_connect` | Connect a network device | `ip` (port 5555 implied) or `ip:port`. Connection failures raise an error, not silent text |
-| `adb_disconnect` | Disconnect one device | Other transports untouched |
-| `adb_pair` | Pair Android 11+ (Wireless Debugging) | Needs `ip:port` **and 6-digit code from the pairing dialog** (both random; dialog must stay open) |
-| `adb_shell` | Run any shell command | Disabled entirely when `allow_shell: false` |
-| `adb_screenshot` | JPEG screenshot | Default 1024px / quality 70; optional `max_px` (320–1920), `quality` (30–95). Followed by a text line with screen/image size and scale — see below. A near-uniformly dark frame is a warning after the image, not a refusal |
-| `adb_ui_dump` | Compact UI hierarchy with tap coordinates | Auto-retries once (600 ms) if uiautomator returns a stale cached dump. Password fields are marked `[PASSWORD]` and listed even with no visible text |
-| `adb_find_and_tap` | Find an element by label and activate it | Picks tap vs DPAD walk **from the device's own features**; refuses instead of guessing — see below |
-| `adb_tap` / `adb_swipe` / `adb_key` | Input control | Key names or keycodes (`HOME`, `BACK`, `WAKEUP`, …). `coords="screenshot"` on tap/swipe reuses the last screenshot's coordinates (120s TTL) — see below. `verify="activity"\|"ui"` checks whether the action changed anything — see below |
-| `adb_text` | Type into focused field | ASCII via `input text`; **non-ASCII (Cyrillic/emoji/CJK) via ADBKeyBoard** — see below. The response reports a character count, never the text itself |
-| `adb_install` | Install APK(s) from `/media` or `/share` | One path → `adb install`. Array of paths → `adb install-multiple`. **One `.apks`/`.xapk`/`.apkm` bundle → splits chosen from the device and installed** — see below. Flags `-r -t -g` |
-| `adb_uninstall` | Uninstall by package name | `keep_data` optional. For system packages, bulk work and backups use `adb_app` |
-| `adb_app` | Package operations with guard rails | list/info/launch/stop/clear/disable/uninstall/enable/restore/backup/state — see below |
-| `adb_push` / `adb_pull` | File transfer device ↔ HA | HA side restricted to `/media`, `/share`; returns transfer stats |
-| `adb_logcat` | Non-blocking log dump | See filter semantics below |
-
-### Installing `.apks` bundles
-
-Apps distributed as `.apks`/`.xapk`/`.apkm` bundles are a base APK plus `config.*` splits. `adb` refuses the bundle itself (`filename doesn't end .apk`), and unpacking it on-device is not an option — Fire OS 7, for one, ships no `unzip`. Pass the bundle and let the app do it:
-
-```
-adb_install apk_path="/media/apk/X-plore_v.4.49.01.apks" dry_run=true
-```
-
-```
-Bundle: X-plore_v.4.49.01.apks (12 apk inside)
-Device: SDK 28, ABI armeabi-v7a,armeabi, 320 dpi, locale en-US
-Chose 3: com.lonelycatgames.Xplore.apk, config.armeabi_v7a.apk, config.xhdpi.apk
-  · ABI: armeabi-v7a (device: armeabi-v7a, armeabi)
-  · density: xhdpi (320 dpi, exact match)
-  · locales: no matching split (device language: en; bundle has: ru) — strings come from the base APK
-```
-
-The bundle is unpacked add-on side (ZIP is read with Node's own `zlib`, no new dependency, nothing needed on the device), and the splits are chosen from **actual device properties** read live: `ro.product.cpu.abilist`, `wm density`, `persist.sys.locale`. Three naming conventions are recognised — bundletool (`splits/base-master.apk`, `base-arm64_v8a.apk`), APKMirror-style (`<package>.apk` + `config.arm64_v8a.apk`) and device-pulled (`base.apk` + `split_config.arm64_v8a.apk`).
-
-**A wrong ABI is refused; a wrong density is not.** An ABI mismatch leaves an app that will not start, so a bundle with no split for any of the device's ABIs is an error and nothing is installed. Density splits fail softly — resources fall back to the base APK — so the nearest bucket is used and the mismatch is reported. Don't infer the ABI from the SoC or the Android version: plenty of Android TV boxes run a 32-bit userland on 64-bit silicon.
-
-Optional arguments, all bundle-only: `dry_run` (report the selection, install nothing), `abi`, `density`, and `locales` — the last one adds language splits beyond the device language, which is what you want when the system is English but you read Russian:
-
-```
-adb_install apk_path="/media/apk/X-plore.apks" locales=["ru"]
-```
-
-Arrays of individual split paths still work exactly as before. To restore an app after a factory reset, `pm path <pkg>` on a working device lists the exact split set — `adb_pull` those and pass them back as an array.
-
-### Screenshot coordinates, and a dark frame
-
-`adb_screenshot`'s image is downscaled to `max_px`, so coordinates read off
-that picture directly would generally miss. The tool follows the image
-with the actual scale, computed against the *logical* screen size (the one
-`input tap`/`adb_ui_dump` use — `wm size`'s `Override size:` when the
-device reports one, else `Physical size:`), not the raw pixel size of the
-captured frame:
-
-```
-screen 1920x1080 (кадр 3840x2160) → image 1024x576 · scale 1.875/1.875 · для adb_tap/adb_swipe передай coords="screenshot"
-```
-
-The `(кадр ...)` part only appears when the captured frame's actual size
-differs from the logical one — confirmed on the fleet to depend on the
-device, not a fixed rule: an Nvidia Shield captures at double its logical
-size and shows the note, while a Fire TV with the *identical* `wm size`
-output already captures at the logical size and shows no note; a TiVo
-Stream 4K, a Galaxy S22 and a Galaxy Watch 6 have no `Override size:` at
-all and show no note either. The watch (480×480) is the one device on the
-fleet smaller than `max_px`: since `-resize`'s `>` flag never enlarges an
-image, its response is a plain `scale 1.000/1.000` — no shrink, no
-stretch. Rotation is judged from the captured frame itself.
-
-Pass `coords="screenshot"` to `adb_tap`/`adb_swipe` to tap using coordinates
-read straight off that image — rescaled automatically, but only within 120s
-of the screenshot and only when `serial` matches between the two calls; an
-older or missing screenshot is refused rather than guessed at. Rotation
-*between* the screenshot and the tap call is not checked — only the
-orientation *within* one screenshot is reconciled. `coords="screen"`
-(default) is the unchanged 1.2.5 behaviour — real screen pixels, from
-`adb_ui_dump`.
-
-A screenshot that comes back almost completely dark (low mean brightness
-and low variance) is a **warning after the image, not a refusal** — a real
-dark scene or a screensaver is legitimate, and refusing would remove the
-picture exactly where it's needed. When it fires, the tool best-effort
-attaches `dumpsys power`'s wakefulness state and a `FLAG_SECURE` check on
-the focused window; either piece is optional and shows as "not determined"
-rather than a guess when it can't be read cleanly.
-
-### `verify` on `adb_tap` / `adb_swipe` / `adb_key`
-
-`verify="activity"` compares the resumed activity before/after the action;
-`verify="ui"` additionally hashes the UI dump before/after (`com.android.systemui`
-nodes excluded, so the status bar itself never counts as a change) — both
-default to off. `"ui"` costs two to three extra UI dumps (~2–4s), which is
-why. A verify failure never turns a performed action into an error — the
-action already happened — it just reports the check as undetermined.
-**Known false positive, confirmed live, not just theoretical:** a live
-element *outside* systemui — a launcher's own clock, a video player's
-elapsed-time counter, an auto-rotating carousel, a watch face's time — is
-not excluded by the systemui filter and can make `"ui"` report "changed"
-with no real action taken; a YouTube timer alone did exactly this in
-testing, and it turns up across unrelated device classes: TV launchers,
-Fire TV's carousel, and a Galaxy Watch 6 watch face. "unchanged" stays
-reliable either way, and for `adb_swipe` it's annotated as usually meaning
-the end of a scrollable list.
-
-A `uiautomator` failure never turns a completed action into an error
-either — confirmed live on a Galaxy Watch 6 with its screen off, where
-`uiautomator` errored with "null root node returned by
-UiTestAutomationBridge": the tap and the `resumed` check both still
-succeeded, only `ui` came back "не определено". With the watch's screen
-on, both a plain dump and `verify="ui"` worked normally — the failure
-tracks the screen being off, not Wear OS as such.
-
-### `adb_find_and_tap`
-
-Finds an on-screen element by `text`, `resource_id` or `desc` and activates it in one call, instead of dumping the UI, reading coordinates and tapping them yourself.
-
-```
-adb_find_and_tap text="Settings"
-adb_find_and_tap resource_id="nav_bar_settings"
-adb_find_and_tap text="Apps" exact=true index=1
-```
-
-**How it activates the element is derived from the device, not assumed.** If `pm list features` reports `android.hardware.touchscreen`, the element centre is tapped. On a leanback (TV) device without one, a coordinate tap does something else entirely: it activates whatever currently **has focus**, so it silently hits the wrong thing. There the element is reached by walking the focus with DPAD keys and then pressing `DPAD_CENTER`. `android.hardware.faketouch`, which Fire TV reports, does not change this — it is not a touchscreen.
-
-**Nothing is pressed unless the target is actually focused.** The UI is re-dumped after every key and the focus is checked. If the focus stops moving, starts cycling between the same nodes, or the target is not reached within `max_steps` or the internal time budget, you get the path walked so far and an explicit statement that nothing was pressed:
-
-```
-Focus is not reachable: came back to "Home", already visited on this walk (UP LEFT RIGHT LEFT).
-Target "Search" cannot be reached by walking — it is most likely not focusable. NOTHING WAS PRESSED.
-```
-
-Matching notes worth knowing:
-
-- `text` is checked against **both** the `text` attribute and `content-desc`. Some TV launchers — Fire TV's among them — put every visible label in `content-desc` and leave `text` empty. `desc` stays narrow and matches `content-desc` only.
-- A label that is not focusable is raised to the element that is. TV launchers put the app name in a non-focusable `banner_image` inside a focusable card; walking to the label itself would never arrive.
-- Several matches without `index` are an error listing the candidates with coordinates, not a guess at which one you meant.
-- `max_steps` defaults to 12 (max 40). Every step re-dumps the UI (~1.5–2 s), and the walk also stops after an internal ~25 s budget — a report you can read beats a connector timeout you cannot.
-
-### `adb_app` — package operations with guard rails
-
-Bulk package work is where an assistant can do real damage, so this tool is built around the assumption that it will eventually be asked to do something wrong.
-
-```
-adb_app action=list filter=user q=amazon
-adb_app action=protected
-adb_app action=disable packages=["com.example.bloat"]          # dry run by default
-adb_app action=disable packages=["com.example.bloat"] dry_run=false
-adb_app action=restore                                          # undo everything, one call
-```
-
-`list`, `info`, `protected` and `state` are read-only. `launch`, `stop` and `clear` act on single apps. `disable`, `uninstall`, `enable`, `restore` and `backup` change state. `stop` and `clear` act immediately — `clear` defaults to `dry_run: true` because it wipes app data, `stop` does not — and both are subject to the network guard below.
-
-The safety model, in order of how often it saves you:
-
-- **Everything that changes state defaults to `dry_run: true`.** You get the plan, the rollback path for each package, and any advisories; set `dry_run=false` to apply.
-- **The protected set is derived from the device, not from a hardcoded list.** Current launcher, active IME, package installer, WebView provider, role holders where the OS exposes them, and account/registration packages. Any overlap **aborts the whole call** — partial application is worse than a refusal, and there is no override flag.
-- **A package that is currently serving an off-device client is refused.** This is the network guard, and it covers `disable`, `uninstall`, `stop` and `clear`. The criterion is read off the device: the package holds a listening TCP socket *and* something outside the device is connected to that same port right now (inbound `ESTABLISHED`, non-loopback peer). Both halves matter — a listening socket alone would make every torrent server undisableable, and an `ESTABLISHED` row with a high local port is just an outbound connection the app opened. The refusal names the port and the peer. This catches the failure the canary cannot: the accounts are fine, the launcher resolves, and the service your home automation was talking to is dead. Lifted only by `force_network: true`, which does **not** lift the protected set. A socket on a shared uid cannot be attributed to one package, so it is refused with that stated plainly rather than waved through. If `/proc/net` cannot be read, the output says the guard was blind instead of pretending it passed.
-- **An account canary runs between batches.** Losing the device's registration is a latent failure: the device boots, apps open, and you only find out at the store. The canary reads the account count and re-resolves the launcher; a drop rolls that batch back and stops. Batch size defaults to 5.
-- **Everything applied is written to a snapshot** under `store` (default `/media/adb-mcp/<device>/state.json`), so `action=restore` undoes it in one call. `pm disable-user` is reversible on its own — but only if you still know *what* you disabled.
-- **`mode=uninstall` sits behind three locks:** the `allow_uninstall` add-on option (off by default), an explicit `mode` in the call, and a successful APK backup. System packages removed with `--user 0` come back via `cmd package install-existing`; a sideloaded one can only come back from the backup, which is why it is mandatory. `force: true` overrides a *failed backup* and nothing else — it is deliberately not the same flag as `force_network`, so that deciding about a backup cannot silently decide about a live service too.
-
-`action=backup` pulls a package's APKs (all splits) plus a `manifest.json` recording version, ABI and the split list — useful on its own, before a factory reset.
-
-`action=launch` also accepts an intent/deep-link form: `uri` and/or `intent_action` (default `android.intent.action.VIEW` once `uri` is set), with `extras` mapping `string→--es`, `boolean→--ez`, an int32-sized integer→`--ei`, a larger integer→`--el`. `packages` is then optional and, with a single value, narrows the resolver via `-p` (more than one is a refusal). `intent_action=android.intent.action.CALL` / `CALL_PRIVILEGED` / `CALL_EMERGENCY` is refused while `allow_shell: false` — independent of whether the call would actually succeed — so a disabled `adb_shell` can't become a quiet side door back to dialing; `allow_shell: true` does not refuse this, since `adb_shell` could dial anyway.
-
-### `adb_logcat` filter semantics
-
-- **No filter** — last `lines` raw lines (`logcat -d -t N`).
-- **Filterspec** (contains `:` or `*`), e.g. `ActivityManager:I *:S` or just `MyTag:D` — applied to the **whole** buffer on-device, tail on-device. `*:S` is auto-appended if you omit it, so unmatched tags stay silent.
-- **Plain substring**, e.g. `bluetooth` — case-insensitive grep across whole lines, on-device.
-
-Filtering/grep/tail all run on the device, so huge log buffers never cross the wire.
-
-### Unicode input: ADBKeyBoard
-
-Android's `input text` is ASCII-only. For anything else, `adb_text` automatically routes through the [ADBKeyBoard](https://github.com/senzhk/ADBKeyBoard) IME: the current keyboard is remembered, switched to AdbIME for the broadcast, and restored afterwards (even on failure).
-
-One-time setup per device: download `ADBKeyboard.apk`, push it and install:
-
-```
-adb_push  host_path=/media/.../ADBKeyboard.apk  device_path=/data/local/tmp/ADBKeyboard.apk
-adb_shell pm install -r -t -g /data/local/tmp/ADBKeyboard.apk
-adb_shell ime enable com.android.adbkeyboard/.AdbIME
-```
-
-Without it, non-ASCII input fails with an instructive error; ASCII always works.
+| Requirement | Detail |
+|---|---|
+| Home Assistant | a Supervisor-managed install (HAOS or Supervised) |
+| Architectures | `amd64`, `aarch64` |
+| Device side | Android with ADB over the network reachable from the HA host |
+| Ports | `3200/tcp` for the MCP endpoint; `5037/tcp` optional, for sharing the adb daemon |
 
 ## Installation
 
-> **A note on wording.** Home Assistant renamed **add-ons** to **apps** in 2026.2 (February 2026) — the UI and the docs changed, nothing else did. `config.yaml`, `repository.yaml`, the store layout and the Supervisor API still say *add-on*, which is why the repository is still named `ha-adb-mcp`. The click paths below are for 2026.2 and newer; on an older core the same two places are called *Add-ons* and *Add-on Store*.
+Home Assistant renamed **add-ons** to **apps**; on an older core the two menus below are called *Add-ons* and *Add-on Store*.
 
 **1. Add this repository**
 
 [![Open your Home Assistant instance and show the add app repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fst412m%2Fha-adb-mcp)
 
-Or by hand: **Settings → Apps → App Store → ⋮ → Repositories → + Add**, paste `https://github.com/st412m/ha-adb-mcp`, select **Add**.
-
-*If the badge opens the App Store but no dialog appears, that is [my.home-assistant.io#698](https://github.com/home-assistant/my.home-assistant.io/issues/698), open since April 2026 — use the manual path above.*
+By hand: **Settings → Apps → App Store → ⋮ → Repositories → + Add**, paste `https://github.com/st412m/ha-adb-mcp`, select **Add**. If the badge opens the App Store without a dialog, use the manual path ([my.home-assistant.io#698](https://github.com/home-assistant/my.home-assistant.io/issues/698)).
 
 **2. Install and configure**
 
-In the new **ADB MCP Server** card: **Install**, then set a long random `token` in Configuration, then **Start**.
+In the **ADB MCP Server** card: **Install**, set a long random `token` in Configuration, then **Start**.
 
-**3. Enable ADB on your devices**
+**3. Enable ADB on the devices**
 
-- **Fire TV / Android TV**: Settings → Developer Options → ADB Debugging → ON. Network ADB listens on port 5555.
-- **Phones/tablets (Android ≤10)**: enable USB debugging, connect via USB once, run `adb tcpip 5555`. Resets on reboot.
-- **Phones/tablets (Android 11+)**: Wireless debugging → "Pair device with pairing code" → call `adb_pair` with the shown `ip:port` + 6-digit code (keep the dialog open) → `adb_connect` to the `ip:port` from the **main** Wireless debugging screen. The RSA key persists — re-pairing is never needed again, but the connect port changes after every reboot, so leave such devices out of `devices` auto-connect.
+- Fire TV / Android TV: Settings → Developer Options → ADB Debugging → ON. Network ADB listens on port 5555.
+- Phones and tablets on Android 10 or older: enable USB debugging, connect over USB once, run `adb tcpip 5555`. This resets on reboot.
+- Phones and tablets on Android 11+: Wireless debugging → "Pair device with pairing code" → call `adb_pair` with the shown `ip:port` and 6-digit code, keeping the dialog open → `adb_connect` to the `ip:port` from the **main** Wireless debugging screen.
 
-**4. Auto-connect stable devices on startup**
+**4. Auto-connect stable devices at startup**
 
 ```yaml
 token: "your-long-random-token"
 devices:
-  - "192.168.1.62"        # Fire TV, port 5555 implied
-  - "192.168.1.80:5555"
+  - "192.168.1.50"        # port 5555 implied
+  - "192.168.1.51:5555"
 allow_shell: true
 allow_uninstall: false
 log_requests: false
@@ -243,86 +49,96 @@ log_requests: false
 
 **5. Accept the debugging prompt**
 
-On first connection, accept the **"Allow USB debugging?"** dialog on each device (check "Always allow"). ADB keys persist in `/data/.android` across app restarts and updates.
+On first connection, accept the **"Allow USB debugging?"** dialog on each device and check "Always allow". ADB keys persist in `/data/.android` across app restarts and updates.
+
+## Configuration
+
+| Option | Default | Description |
+|---|---|---|
+| `token` | `changeme` | Secret path token. **Change it.** |
+| `devices` | `[]` | `ip` or `ip:port` entries auto-connected at startup |
+| `allow_shell` | `true` | `false` disables the raw `adb_shell` tool; internal plumbing keeps working |
+| `allow_uninstall` | `false` | `true` unlocks `adb_app mode=uninstall` |
+| `log_requests` | `false` | HTTP access log in the proxy and a per-tool-call log in the server |
+
+Longer notes, including what stays available with `allow_shell: false` and how arguments are masked in the log, are in [docs/configuration.md](docs/configuration.md).
 
 ## Connecting claude.ai
 
-Expose port 3200 through your reverse proxy (Caddy/nginx/Cloudflare Tunnel), then add a custom connector:
+Expose port 3200 through a reverse proxy (Caddy, nginx, Cloudflare Tunnel), then add a custom connector pointing at:
 
 ```
 https://your-domain/private_<token>/mcp
 ```
 
-## Known limitations
+## Tools
 
-- **Tool list is cached per chat.** After updating the app, an already-open chat keeps the old tool schemas. Start a new one to see new tools or changed parameters. (As of 0.5.1 an array parameter still works even against a stale string schema — the server coerces it — but the description you see will be outdated.)
-- **Gateway timeout ~60 s per tool call.** Long-running shell commands will be cut off by the connector, not by the app. Background them on-device and poll, rather than blocking.
-- **aarch64 is build-verified, not device-verified.** See Platforms above.
-- **Screenshots wake devices.** `screencap` on a sleeping Android TV wakes it, and HDMI-CEC will happily switch on the television attached to it. Worth remembering before scripting a screenshot loop.
-- **One adb session per device.** Android's adbd does not tolerate two independent TCP clients; if you also use the `androidtv` integration, route it through this app's adb server — see below.
+18 tools. Full semantics, guard rails, refusal rules and per-tool timeouts are in [docs/tools.md](docs/tools.md).
 
-### Timeouts and failure behaviour
+**Session**
 
-Every ADB invocation runs under a hard timeout and is killed when it expires, so a device that sleeps, reboots or drops off the network fails the call instead of hanging it. The error is returned as a normal MCP tool result with `isError: true` and a text message — never a stalled request.
+- `adb_devices` — list connected devices with serial, state and description
+- `adb_connect` — connect a network device, `ip` or `ip:port`
+- `adb_disconnect` — drop one host, or every transport
+- `adb_pair` — pair an Android 11+ device over Wireless Debugging
 
-| Tool | Timeout |
-|---|---|
-| `adb_connect` / `adb_disconnect` | 10 s |
-| `adb_pair`, `adb_logcat` | 20 s |
-| `adb_shell` | 30 s, raised to at most 120 s via `timeout_sec` |
-| `adb_screenshot`, `adb_ui_dump`, `adb_tap` / `adb_swipe` / `adb_key` / `adb_text` | 30 s |
-| `adb_find_and_tap` | 30 s per ADB call, plus an internal ~25 s budget for the whole DPAD walk |
-| `adb_uninstall` | 60 s |
-| `adb_push` / `adb_pull` | 120 s |
-| `adb_install` | 180 s, 300 s for a bundle |
+**Shell and logs**
 
-Common ADB failures are rewritten with the action that fixes them, e.g. `device offline` returns *"the TCP session died (device slept or rebooted) — run `adb_disconnect` for this host, then `adb_connect` again"*, and `device not found` points at `adb_devices`.
+- `adb_shell` — run any shell command, return stdout
+- `adb_logcat` — non-blocking log dump, filterspec or substring, filtered on-device
 
-One caveat worth knowing: `adb_install`, `adb_push`, `adb_pull` and `adb_uninstall` allow more time than the ~60 s gateway timeout above. On a genuinely long transfer the connector will give up before the app does, so the boundary you hit first is your reverse proxy, not this code. The auth proxy itself sets no timeout — it is a plain pipe.
+**Screen and input**
 
-## Coexistence with the androidtv integration
+- `adb_screenshot` — JPEG screenshot plus a line giving the screen size, image size and scale
+- `adb_ui_dump` — compact UI hierarchy with tap coordinates
+- `adb_tap` — tap a coordinate, optionally in screenshot coordinates, with optional `verify`
+- `adb_swipe` — swipe between two points; same point plus a long duration is a long-press
+- `adb_key` — send a keyevent by name or numeric code
+- `adb_text` — type into the focused field; non-ASCII goes through ADBKeyBoard
+- `adb_find_and_tap` — find an element by label and activate it, tapping or walking the focus
 
-The HA `androidtv` integration by default connects to devices **directly** (python adb-shell), and Android's adbd dislikes two independent TCP clients — sessions will fight. Solution: this app runs a classic adb server (`adb -a`) on port 5037. Map `5037/tcp` in the app's network config, then point the androidtv integration at *ADB server* = HA host IP, port 5037. The integration and this MCP server then share one adb daemon and one device session.
+**Apps and files**
 
-Heads-up: `adb_server_ip` is not in the integration's options flow — switching an existing entry means deleting and re-adding it. Entity IDs survive if the device `unique_id` (MAC) is unchanged.
+- `adb_install` — install one `.apk`, a split set, or one `.apks`/`.xapk`/`.apkm` bundle
+- `adb_uninstall` — uninstall by package name
+- `adb_app` — package operations with guard rails: list, launch, stop, clear, disable, uninstall, back up, restore
+- `adb_push` — copy a file from `/media` or `/share` to the device
+- `adb_pull` — copy a file from the device to `/media` or `/share`
 
-## Config options
+## Limitations
 
-| Option | Default | Description |
-|---|---|---|
-| `token` | `changeme` | Secret path token. **Change it.** |
-| `devices` | `[]` | List of `ip` or `ip:port` to auto-connect at startup. Don't list Android 11+ wireless-debug devices (random ports) |
-| `allow_shell` | `true` | `false` disables the raw `adb_shell` tool. Internal plumbing (ui_dump, unicode input, logcat filters) keeps working |
-| `allow_uninstall` | `false` | `true` unlocks `adb_app mode=uninstall`. Leave it off unless you are actually removing packages: `mode=disable` is reversible and covers nearly every case. Turning it on still does not bypass the protected set, the canary or the mandatory APK backup |
-| `log_requests` | `false` | Two logs at once: HTTP access log in the auth proxy (IP, method, masked path, status) **and** per-tool-call log in the server (`[tool] <ISO> <name> <args> -> ok NB \| image NKB \| ERROR <msg> <ms>`) |
+- The tool list is cached per chat. After updating the app, an already-open chat keeps the old tool schemas; start a new chat to see changed tools or parameters.
+- A gateway timeout of roughly 60 s applies per tool call. Long-running shell commands are cut off by the connector, not by the app. Background them on-device and poll.
+- `aarch64` is build-verified, not device-verified: the image builds and starts and the screenshot smokes pass, but the ADB tools themselves have not been exercised on that architecture.
+- Screenshots wake devices. `screencap` on a sleeping Android TV wakes it, and HDMI-CEC will switch on the attached television.
+- One ADB session per device. Android's `adbd` does not tolerate two independent TCP clients; to run the `androidtv` integration alongside this app, route it through this app's adb server — see [docs/coexistence-androidtv.md](docs/coexistence-androidtv.md).
 
 ## Troubleshooting
 
-**`INSTALL_FAILED_VERIFICATION_FAILURE`** — the on-device package verifier is rejecting ADB installs. It is a separate switch from `package_verifier_enable`, and its default (unset) means *enabled*:
+`INSTALL_FAILED_VERIFICATION_FAILURE` — the on-device verifier rejects ADB installs:
 
 ```
 adb_shell settings put global verifier_verify_adb_installs 0
 ```
 
-Seen on certified Android TV devices with Play Services. Devices without Play Protect (Fire OS, for instance) never hit this regardless of the setting, because there is no verifier agent to consult.
+`device offline` / `device not found` — the TCP session died: `adb_disconnect` that host, then `adb_connect` again. On Android 11+ wireless debugging the port changes after every reboot.
 
-**An Android app looks dead right after installing it** — after a replace, dexopt runs before the first launch, so the process can take noticeably longer than usual to appear. Check logcat for an actual `FATAL` before concluding it crashed. `VerityUtils: Failed to measure fs-verity` in the log after a sideload is normal, not an error.
+A black screenshot — read the warning under the image. `screen: Asleep` means the device is asleep, so `adb_key WAKEUP` first; `FLAG_SECURE` means the system is hiding the content.
 
-**`device offline` / `device not found`** — the TCP session died (device slept or rebooted). `adb_disconnect` that host, then `adb_connect` again. For Android 11+ wireless debugging, the port changes after every reboot.
+Everything else is in [docs/troubleshooting.md](docs/troubleshooting.md).
 
-**`adb_find_and_tap` says the element is not found, but you can see it on screen** — read the "visible now" list in the error: it is built from the same nodes the search used. An element drawn as an image with no label of any kind is genuinely invisible to `uiautomator`; use `adb_ui_dump` and `adb_tap`/`adb_key` directly. A dump taken while the screen is still animating can also miss it — the app retries a stale dump once, but a slow transition may need a second call.
+## Security
 
-**`uiautomator: ERROR: null root node returned by UiTestAutomationBridge`** — the accessibility bridge lost the window, typically right as the screen changes. Retry the call; it is not a persistent fault.
+- ADB is not a sandbox. `adb_uninstall` removes app data, and disabling system packages can leave a device unbootable. Start with `allow_shell: false`, and keep a way to recover each device.
+- The token in the URL path is the only auth layer. Use a long random value and serve it over HTTPS.
+- `adb_shell` is full device shell access. Disable it if you only need screenshots and UI control.
+- `adb_push`, `adb_pull` and `adb_install` are restricted to `/media` and `/share` on the HA side.
+- `adb_app` writes APK backups and its rollback snapshot under `store`, default `/media/adb-mcp`. Those APKs are readable by anything else with access to `/media`.
+- Never expose port 5037 beyond your LAN — the adb server has no auth at all.
+- With `log_requests: true`, `adb_text` input and `adb_pair` codes are masked in the log and in error text; `adb_shell.command` is not, since it has no fixed shape to mask. Type secrets through `adb_text`.
 
-## Security notes
+## Links
 
-- The token in the URL path is the only auth layer — use a long random value and HTTPS.
-- `adb_shell` is full device shell access. Disable it (`allow_shell: false`) if you only need screenshots/UI control.
-- `adb_push`/`adb_pull`/`adb_install` are restricted to `/media` and `/share` on the HA side.
-- `adb_app` writes APK backups and its rollback snapshot under `store` (default `/media/adb-mcp`) — those APKs are readable by anything else with access to `/media`.
-- **Never expose port 5037 beyond your LAN** — the adb server has no auth at all.
-- With `log_requests: true`, `adb_text` input and `adb_pair` codes are masked in the log and in error text — but `adb_shell.command` is not, since it's an arbitrary admin command with no fixed shape to mask. Type secrets through `adb_text`, not through `input text` run via `adb_shell`.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+- [docs/](docs/) — [tools](docs/tools.md), [configuration](docs/configuration.md), [troubleshooting](docs/troubleshooting.md), [coexistence with androidtv](docs/coexistence-androidtv.md), [internals](docs/internals.md)
+- [Changelog](adb_mcp/CHANGELOG.md)
+- [License](LICENSE) — MIT

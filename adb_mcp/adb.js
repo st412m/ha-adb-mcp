@@ -25,11 +25,11 @@ function friendlyAdbError(msg) {
   if (/device '.*' not found|no devices\/emulators found/i.test(msg))
     return `${msg}. Call adb_devices to list what is connected; network devices may need adb_connect first (wireless-debug ports change after phone reboot).`;
   if (/device offline/i.test(msg))
-    return `${msg}. The TCP session died (device slept or rebooted) — run adb_disconnect for this host, then adb_connect again.`;
+    return `${msg}. The TCP session died (device slept or rebooted) - run adb_disconnect for this host, then adb_connect again.`;
   if (/device unauthorized|failed to authenticate/i.test(msg))
     return `${msg}. Confirm the "Allow USB debugging?" RSA prompt on the device screen (check "Always allow").`;
   if (/INSTALL_FAILED_VERIFICATION_FAILURE/i.test(msg))
-    return `${msg}. The on-device package verifier rejects ADB installs — disable it once via adb_shell: settings put global verifier_verify_adb_installs 0`;
+    return `${msg}. The on-device package verifier rejects ADB installs - disable it once via adb_shell: settings put global verifier_verify_adb_installs 0`;
   return msg;
 }
 
@@ -128,7 +128,7 @@ function coerceObject(v) {
       } catch { /* не JSON — падаем в отказ ниже */ }
     }
   }
-  throw new Error(`extras: ожидался объект ключ→значение, получено ${JSON.stringify(v).slice(0, 120)}`);
+  throw new Error(`extras: expected a key-value object, got ${JSON.stringify(v).slice(0, 120)}`);
 }
 
 function resolveSafeHostPath(p) {
@@ -143,7 +143,7 @@ function ensureDir(p) {
   return p;
 }
 
-// serial вида 192.168.1.62:5555 -> 192.168.1.62_5555 (для имён каталогов)
+// serial вида 192.168.1.50:5555 -> 192.168.1.50_5555 (для имён каталогов)
 function sanitizeSerial(serial) {
   return String(serial || 'default').replace(/[^\w.\-]+/g, '_');
 }

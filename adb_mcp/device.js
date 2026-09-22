@@ -189,10 +189,10 @@ async function getProps(serial) {
   if (!abilist.length && m.abi) abilist.push(String(m.abi).trim());
 
   const notes = [];
-  if (!locale) notes.push('локаль устройства определить не удалось — выбор config.<locale> при установке сплитов будет пропущен');
-  if (!densityPhysical) notes.push('плотность экрана определить не удалось — выбор config.<density> будет пропущен');
+  if (!locale) notes.push('device locale not determined - config.<locale> is skipped when installing splits');
+  if (!densityPhysical) notes.push('screen density not determined - config.<density> is skipped');
   if (densityOverride && densityPhysical && densityOverride !== densityPhysical)
-    notes.push(`задан Override density ${densityOverride} при физической ${densityPhysical} — сплиты выбираются по override`);
+    notes.push(`Override density ${densityOverride} is set over physical ${densityPhysical} - splits are chosen by the override`);
 
   return {
     sdk: Number.isFinite(sdk) ? sdk : 0,
@@ -272,17 +272,17 @@ async function accountSnapshot(serial) {
  */
 async function roleHolders(serial, sdk) {
   if (!(sdk >= 29))
-    return { holders: [], detail: {}, note: `сервиса ролей нет на этой платформе (SDK ${sdk || '?'} < 29) — роли не опрашивались, это норма` };
+    return { holders: [], detail: {}, note: `no role service on this platform (SDK ${sdk || '?'} < 29) - roles were not queried, which is normal` };
 
   let out = '';
   try {
     out = await adbSh(serial, 'dumpsys role');
   } catch (e) {
-    return { holders: [], detail: {}, note: `⚠ dumpsys role не отработал (${e.message}) — РОЛИ НЕ УЧТЕНЫ В ЗАЩИТЕ` };
+    return { holders: [], detail: {}, note: `⚠ dumpsys role failed (${e.message}) - roles NOT included in the protected set` };
   }
 
   if (!/ROLE STATE|roles=|name=android\.app\.role/i.test(out))
-    return { holders: [], detail: {}, note: '⚠ dumpsys role не вернул состояние ролей — РОЛИ НЕ УЧТЕНЫ В ЗАЩИТЕ' };
+    return { holders: [], detail: {}, note: '⚠ dumpsys role returned no role state - roles NOT included in the protected set' };
 
   // Блоки вида:  { name=android.app.role.HOME \n holders=pkg[,pkg] }
   // Режем по границе блока, а не ловим окном фиксированной длины:
@@ -302,7 +302,7 @@ async function roleHolders(serial, sdk) {
   }
 
   if (!holders.size)
-    return { holders: [], detail: {}, note: 'dumpsys role отработал, но держателей ролей на устройстве нет' };
+    return { holders: [], detail: {}, note: 'dumpsys role answered, but the device has no role holders' };
 
   return { holders: Array.from(holders).sort(), detail, note: null };
 }
@@ -360,13 +360,13 @@ async function netListeners(serial) {
     }));
   } catch (e) {
     return { ok: false, byPackage: {}, byUid: {}, unattributed: [],
-      note: `⚠ слушающие сокеты не опрошены (${e.message}) — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
+      note: `⚠ listening sockets not collected (${e.message}) - the network signal is NOT included in the protected set` };
   }
 
   const m = splitMarked(out);
   if (!String(m.tcp || '').trim())
     return { ok: false, byPackage: {}, byUid: {}, unattributed: [],
-      note: '⚠ /proc/net/tcp пуст или недоступен шеллу — СЕТЕВОЙ ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
+      note: '⚠ /proc/net/tcp is empty or not readable by the shell - the network signal is NOT included in the protected set' };
 
   const byUid = {};
   for (const line of String(m.uidmap || '').split('\n')) {
@@ -413,7 +413,7 @@ async function netListeners(serial) {
     for (const e of established) {
       if (e.uid !== uid || !ports.has(e.lport)) continue;
       if (isLoopback(e.peer)) continue;   // клиент на том же устройстве — не внешняя зависимость
-      const tag = `${e.peer} → :${e.lport}`;
+      const tag = `${e.peer} -> :${e.lport}`;
       if (!external.includes(tag)) external.push(tag);
     }
 
@@ -424,8 +424,8 @@ async function netListeners(serial) {
         serving: external,
         owners: owners.length,
         why: owners.length
-          ? `uid делят ${owners.length} пакетов (общий sharedUserId) — какой именно слушает, из /proc/net/tcp не видно`
-          : 'у uid нет установленных пакетов (системный демон вне пакетной модели)',
+          ? `${owners.length} packages share this uid - /proc/net/tcp does not show which one is listening`
+          : 'no installed package owns this uid (system daemon outside the package model)',
       });
       continue;
     }
@@ -439,8 +439,8 @@ async function netListeners(serial) {
   }
 
   const note = unattributed.length
-    ? `ℹ сетевой признак: ${unattributed.length} слушающих uid не привязаны к пакету ` +
-      `(общий sharedUserId или демон вне пакетной модели) — эти сокеты в защите НЕ УЧТЕНЫ, см. net_unattributed`
+    ? `ℹ network signal: ${unattributed.length} listening uid${unattributed.length === 1 ? '' : 's'} not attributed to a package ` +
+      `(shared uid, or a daemon outside the package model) - these sockets are NOT included in the protected set, see net_unattributed`
     : null;
 
   return { ok: true, byPackage, byUid, unattributed, note };
@@ -514,39 +514,25 @@ function servingHits(net, packages) {
   return hits.sort((a, b) => a.package.localeCompare(b.package));
 }
 
-/** Русская форма числительного: 1 пакет, 2 пакета, 5 пакетов. */
-function plural(n, one, few, many) {
-  const a = Math.abs(n) % 100, b = a % 10;
-  if (a > 10 && a < 20) return `${n} ${many}`;
-  if (b > 1 && b < 5) return `${n} ${few}`;
-  if (b === 1) return `${n} ${one}`;
-  return `${n} ${many}`;
-}
-
 /** Текст отказа сетевого гарда. Отдельной функцией — он одинаков для
  *  disable / uninstall / stop / clear, а расходиться такие тексты умеют. */
 function servingRefusal(hits, what) {
   const lines = hits.map(h => h.attributed
-    ? `  · ${h.package} — слушает ${h.ports.length > 1 ? 'порты' : 'порт'} ${h.ports.join(', ')}, ` +
-      `прямо сейчас обслуживает ${h.serving.join(', ')}`
-    : `  · ${h.package} — uid ${h.uid} слушает ${h.ports.join(', ')} и прямо сейчас обслуживает ` +
-      `${h.serving.join(', ')}. Этот uid делят ${plural(h.owners, 'пакет', 'пакета', 'пакетов')}, ` +
-      `какой из них держит сокет — ` +
-      `из /proc/net не видно. Что это НЕ ${h.package}, доказать нечем`);
+    ? `  · ${h.package} - listening on ${h.ports.length > 1 ? 'ports' : 'port'} ${h.ports.join(', ')}, ` +
+      `currently serving ${h.serving.join(', ')}`
+    : `  · ${h.package} - uid ${h.uid} is listening on ${h.ports.join(', ')} and currently serving ` +
+      `${h.serving.join(', ')}. ${h.owners} packages share this uid; /proc/net does not show ` +
+      `which one holds the socket, and there is no evidence it is NOT ${h.package}`);
 
   const unproven = hits.some(h => !h.attributed);
 
-  return `ОТКАЗ (${what}): пакет прямо сейчас обслуживает клиента вне устройства.\n` +
+  return `REFUSED (${what}): the package is currently serving a client outside the device.\n` +
     lines.join('\n') + '\n' +
-    'Это не «слушает на всякий случай», а живое входящее соединение с чужого адреса: ' +
-    'что-то снаружи от пакета зависит именно сейчас. Такой отказ канарейка не поймает — ' +
-    'она смотрит внутрь устройства (аккаунты, лаунчер), а сломанным окажется то, что видно только снаружи.\n' +
     (unproven
-      ? 'Часть попаданий НЕДОКАЗАНА: сокет принадлежит общему uid, и связь с конкретным пакетом ' +
-        'установить нельзя — отказ здесь по принципу «не доказано, что можно».\n'
+      ? 'Some hits are unproven: the socket belongs to a shared uid and cannot be tied to one package.\n'
       : '') +
-    'Ничего не выполнено (целиком, а не частично). Если это осознанно — повтори с force_network: true. ' +
-    '(Это отдельный флаг: `force` относится только к провалу бэкапа APK и гард не снимает.)';
+    'Nothing was applied. Repeat with force_network: true to override; ' +
+    '`force` does not lift this guard.';
 }
 
 /**
@@ -571,7 +557,7 @@ async function authProviders(serial) {
   try {
     out = await adbSh(serial, 'dumpsys account 2>/dev/null | grep AuthenticatorDescription');
   } catch (e) {
-    return { byPackage: {}, note: `⚠ поставщики аутентификаторов не опрошены (${e.message}) — ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ` };
+    return { byPackage: {}, note: `⚠ authenticator providers not collected (${e.message}) - the signal is NOT included in the protected set` };
   }
 
   const byPackage = {};
@@ -586,7 +572,7 @@ async function authProviders(serial) {
   }
 
   if (!Object.keys(byPackage).length)
-    return { byPackage: {}, note: '⚠ в dumpsys account не найдено ни одного аутентификатора — ПРИЗНАК НЕ УЧТЁН В ЗАЩИТЕ' };
+    return { byPackage: {}, note: '⚠ dumpsys account lists no authenticator - the signal is NOT included in the protected set' };
 
   return { byPackage, note: null };
 }
@@ -607,7 +593,7 @@ async function protectedSet(serial, opts = {}) {
     try {
       out = await adbSh(serial, cmd);
     } catch (e) {
-      notes.push(`⚠ ${humanName}: опрос не удался (${e.message}) — источник НЕ УЧТЁН В ЗАЩИТЕ`);
+      notes.push(`⚠ ${humanName}: probe failed (${e.message}) - source NOT included in the protected set`);
       return;
     }
     const raw = extract(out);
@@ -620,8 +606,8 @@ async function protectedSet(serial, opts = {}) {
       // удалось» — значит гнать читателя искать поломку, которой нет.
       const empty = !String(raw || '').trim();
       notes.push(empty
-        ? `ℹ ${humanName}: на этом устройстве подсистемы нет (ответ пустой) — источник не применим, в защите не учитывается`
-        : `⚠ ${humanName}: определить не удалось (ответ: ${JSON.stringify(String(raw || '').slice(0, 80))}) — источник НЕ УЧТЁН В ЗАЩИТЕ`);
+        ? `ℹ ${humanName}: the subsystem is absent on this device (empty answer) - source not applicable, not included in the protected set`
+        : `⚠ ${humanName}: not determined (answer: ${JSON.stringify(String(raw || '').slice(0, 80))}) - source NOT included in the protected set`);
       return;
     }
     sources[key] = pkg;
@@ -632,7 +618,7 @@ async function protectedSet(serial, opts = {}) {
   // Лаунчер — resolve-activity есть уже на SDK 28
   await derive('launcher',
     'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null',
-    lastLine, 'лаунчер');
+    lastLine, 'launcher');
 
   // Установщик пакетов. content:// — рабочая форма на SDK 29+; file:// там
   // не резолвится вообще, но остаётся фолбэком для старых прошивок.
@@ -649,19 +635,19 @@ async function protectedSet(serial, opts = {}) {
       } catch { /* пробуем следующую форму */ }
     }
     if (found) sources.installer = found;
-    else notes.push('⚠ установщик пакетов: определить не удалось ни через content://, ни через file:// — источник НЕ УЧТЁН В ЗАЩИТЕ');
+    else notes.push('⚠ package installer: not determined via content:// or file:// - source NOT included in the protected set');
   }
 
   // Активный IME
   await derive('ime', 'settings get secure default_input_method',
-    out => String(out).trim(), 'активный IME');
+    out => String(out).trim(), 'active IME');
 
   // Провайдер WebView
   await derive('webview', 'dumpsys webviewupdate 2>/dev/null | head -n 12',
     out => {
       const m = String(out).match(/Current WebView package \(name, version\):\s*\(([^,\s)]+)/);
       return m ? m[1] : '';
-    }, 'провайдер WebView');
+    }, 'WebView provider');
 
   // Роли
   const roles = await roleHolders(serial, props.sdk);
@@ -696,15 +682,15 @@ async function protectedSet(serial, opts = {}) {
 
   const netSystem = {}, authSystem = {};
   for (const [pkg, info] of Object.entries(net.byPackage)) {
-    const where = `слушает порт${info.ports.length > 1 ? 'ы' : ''} ${info.ports.join(', ')}` +
-      (info.serving.length ? `; СЕЙЧАС обслуживает ${info.serving.join(', ')}` : '');
+    const where = `listening on port${info.ports.length > 1 ? 's' : ''} ${info.ports.join(', ')}` +
+      (info.serving.length ? `; currently serving ${info.serving.join(', ')}` : '');
     if (pkgs.system.has(pkg)) netSystem[pkg] = info;
-    else advisories.push({ package: pkg, signal: 'net_listener', system: false, detail: `${where} — что-то вне устройства может от него зависеть` });
+    else advisories.push({ package: pkg, signal: 'net_listener', system: false, detail: `${where} - something outside the device may depend on it` });
   }
   for (const [pkg, types] of Object.entries(auth.byPackage)) {
-    const where = `обслуживает аутентификатор аккаунта: ${types.join(', ')}`;
+    const where = `registers an account authenticator: ${types.join(', ')}`;
     if (pkgs.system.has(pkg)) authSystem[pkg] = types;
-    else advisories.push({ package: pkg, signal: 'authenticator', system: false, detail: `${where} — отключение может унести связанные аккаунты` });
+    else advisories.push({ package: pkg, signal: 'authenticator', system: false, detail: `${where} - disabling it can take the linked accounts with it` });
   }
   if (Object.keys(netSystem).length) sources.net_listener = netSystem;
   if (net.unattributed && net.unattributed.length) sources.net_unattributed = net.unattributed;
@@ -729,9 +715,9 @@ async function protectedSet(serial, opts = {}) {
   for (const p of accountLike) set.add(p);
 
   if (accountLike.length)
-    notes.push('account_like — эвристика по именам пакетов (дополнительный источник), проверяй глазами в dry_run');
+    notes.push('account_like is a package-name heuristic (supplementary source) - check it by eye in dry_run');
   if (advisories.length)
-    notes.push(`${advisories.length} пользовательских пакетов с признаками внешней связности — не защищены (обратимы через бэкап APK), см. advisories`);
+    notes.push(`${advisories.length} user package${advisories.length === 1 ? '' : 's'} with external-connectivity signals - not protected (reversible via APK backup), see advisories`);
   for (const n of (props.notes || [])) notes.push(n);
 
   return {

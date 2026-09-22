@@ -132,7 +132,7 @@ async function packagePaths(serial, pkg) {
  */
 async function backupPackage(serial, pkg, args, props) {
   const remote = await packagePaths(serial, pkg);
-  if (!remote.length) throw new Error(`pm path вернул пусто для ${pkg} — пакет не установлен?`);
+  if (!remote.length) throw new Error(`pm path returned nothing for ${pkg} - package not installed?`);
   const ver = await packageVersion(serial, pkg);
   const dir = path.join(deviceDir(args, serial), 'apk', pkg, ver.versionCode || '0');
   ensureDir(dir);
@@ -143,7 +143,7 @@ async function backupPackage(serial, pkg, args, props) {
     const local = path.join(dir, base);
     await adb(withSerial(serial, ['pull', r, local]), { timeout: 180000 });
     const size = fs.existsSync(local) ? fs.statSync(local).size : 0;
-    if (!size) throw new Error(`Бэкап ${pkg}: файл ${base} вытянулся пустым`);
+    if (!size) throw new Error(`Backup ${pkg}: file ${base} pulled empty`);
     files.push({ name: base, size, device_path: r });
   }
 
@@ -163,7 +163,7 @@ async function backupPackage(serial, pkg, args, props) {
 
 async function installFromBackupDir(serial, dir) {
   const apks = fs.readdirSync(dir).filter(f => f.endsWith('.apk')).map(f => path.join(dir, f));
-  if (!apks.length) throw new Error(`В ${dir} нет ни одного .apk`);
+  if (!apks.length) throw new Error(`No .apk in ${dir}`);
   const verb = apks.length > 1 ? 'install-multiple' : 'install';
   const out = await adb(withSerial(serial, [verb, '-r', '-t', '-g', ...apks]), { timeout: 180000 });
   return out.toString().trim() || `${verb}: ${apks.length} file(s) OK`;
@@ -183,7 +183,7 @@ async function canaryCheck(serial, baseline) {
   if (baseline.accounts.available && acc.available && acc.count < baseline.accounts.count) {
     result.ok = false;
     result.problems.push(
-      `аккаунтов было ${baseline.accounts.count}, стало ${acc.count} — потеряна регистрация устройства`);
+      `account count went from ${baseline.accounts.count} to ${acc.count} - device registration lost`);
   }
 
   try {
@@ -192,11 +192,11 @@ async function canaryCheck(serial, baseline) {
     result.launcher = home.trim();
     if (!result.launcher || /no activity|null/i.test(result.launcher)) {
       result.ok = false;
-      result.problems.push('лаунчер больше не резолвится — устройство останется без домашнего экрана');
+      result.problems.push('the launcher no longer resolves - the device would be left without a home screen');
     }
   } catch (e) {
     result.ok = false;
-    result.problems.push(`лаунчер не проверить: ${e.message}`);
+    result.problems.push(`launcher could not be checked: ${e.message}`);
   }
 
   return result;
@@ -233,7 +233,7 @@ async function networkGuard(serial, packages, what, forceNetwork, netSnapshot) {
       net = await netListeners(serial);
     } catch (e) {
       net = { ok: false, byPackage: {}, byUid: {}, unattributed: [],
-        note: `сетевой признак не опрошен (${e.message}) — ГАРД НЕ РАБОТАЛ` };
+        note: `network signal not collected (${e.message}) - the guard did NOT run` };
     }
   }
 
@@ -252,11 +252,12 @@ async function networkGuard(serial, packages, what, forceNetwork, netSnapshot) {
 /** Как гард выглядит в JSON-выдаче. Слепой гард обязан быть виден. */
 function guardReport(guard) {
   if (guard.blind)
-    return { status: 'СЛЕП', note: guard.note, checked: false,
-      why: 'признак не снялся с устройства — разрушающее действие выполняется БЕЗ сетевой проверки' };
+    return { status: 'blind', note: guard.note, checked: false,
+      why: 'the signal could not be read from the device - the destructive action runs without the network check' };
   if (guard.overridden.length)
-    return { status: 'ПЕРЕКРЫТ force_network=true', checked: true, overridden: guard.overridden, note: guard.note };
-  return { status: 'чисто', checked: true, note: guard.note };
+    return { status: 'overridden', checked: true, overridden: guard.overridden, note: guard.note,
+      why: 'the network guard was lifted by force_network=true' };
+  return { status: 'not_serving', checked: true, note: guard.note };
 }
 
 // ------------------------------------------------------------------ действия
@@ -281,13 +282,13 @@ async function actList(serial, args) {
     return `${p} [${flags.join(',')}]`;
   });
   return text(
-    `filter=${filter}${q ? ` q=${q}` : ''} — ${list.length} of ${pkgs.all.length} packages\n\n` +
+    `filter=${filter}${q ? ` q=${q}` : ''} - ${list.length} of ${pkgs.all.length} packages\n\n` +
     (lines.join('\n') || '(none)'));
 }
 
 async function actInfo(serial, args) {
   const packages = coerceArray(args.packages || args.package).filter(Boolean);
-  if (!packages.length) throw new Error('action=info требует packages');
+  if (!packages.length) throw new Error('action=info requires packages');
   const pkgs = await listPackages(serial);
   const out = [];
   for (const p of packages) {
@@ -331,14 +332,14 @@ function extrasToAmFlags(extras) {
   const obj = coerceObject(extras);
   const flags = [];
   for (const [k, v] of Object.entries(obj)) {
-    if (!AM_TOKEN_RE.test(k)) throw new Error(`extras.${k}: имя ключа должно быть [A-Za-z0-9_.]+`);
+    if (!AM_TOKEN_RE.test(k)) throw new Error(`extras.${k}: key name must match [A-Za-z0-9_.]+`);
     if (typeof v === 'boolean') flags.push('--ez', sq(k), sq(String(v)));
     else if (typeof v === 'string') flags.push('--es', sq(k), sq(v));
     else if (typeof v === 'number' && Number.isInteger(v)) {
       const isInt32 = v >= -2147483648 && v <= 2147483647;
       flags.push(isInt32 ? '--ei' : '--el', sq(k), sq(String(v)));
     } else {
-      throw new Error(`extras.${k}: неподдерживаемый тип значения (${typeof v}) — допустимы string/boolean/integer`);
+      throw new Error(`extras.${k}: unsupported value type (${typeof v}) - allowed: string, boolean, integer`);
     }
   }
   return flags;
@@ -364,14 +365,14 @@ async function parseAmStartOutput(serial, out, ctx) {
 
   // 1. Нет обработчика.
   if (nonEcho.some(l => /^Error:\s*Activity not started, unable to resolve Intent/.test(l)))
-    throw new Error(`Нет обработчика для этого intent (action=${ctx.action}).\n${rawOut}`);
+    throw new Error(`No handler for this intent (action=${ctx.action}).\n${rawOut}`);
 
   // 2. «Доставлено в уже открытое» — успех, и проверяется ДО общих ошибок:
   //    в строке есть «Activity not started», по виду похожее на отказ.
   const delivered = nonEcho.find(l =>
     /^Warning:\s*Activity not started, intent has been delivered to currently running top-most instance/.test(l));
   if (delivered)
-    return text(`Доставлено в уже открытое (${ctx.pkg || ctx.action}).\n${delivered}`);
+    return text(`Delivered to the already running instance (${ctx.pkg || ctx.action}).\n${delivered}`);
 
   // 3. Диалог выбора обработчика — тул сам его открыл, сам и убирает: один
   //    KEYCODE_BACK, перечитать resumed. Если диалог всё ещё наверху —
@@ -383,8 +384,8 @@ async function parseAmStartOutput(serial, out, ctx) {
     await new Promise(r => setTimeout(r, 500));
     const after = await resumedActivity(serial);
     if (after.raw && /ResolverActivity|ChooserActivity/.test(after.raw))
-      return text(`Несколько обработчиков, диалог выбора всё ещё наверху: ${after.raw}`);
-    return text(`Несколько обработчиков, диалог выбора закрыт — укажи packages.\n${activityLine}`);
+      return text(`Several handlers; the chooser dialog is still on top: ${after.raw}`);
+    return text(`Several handlers; the chooser dialog was closed - pass packages.\n${activityLine}`);
   }
 
   // 4. Прочие ошибки — по началу строки (Error:) или по регистрозависимому
@@ -403,7 +404,7 @@ async function parseAmStartOutput(serial, out, ctx) {
   //    мешает, если формат эха когда-нибудь слегка изменится.
   const errPool = nonEcho.filter(l => !/^Starting:/.test(l) && !/^Activity:/.test(l));
   const errLine = errPool.find(l => /^Error:/.test(l) || l.includes('Exception'));
-  if (errLine) throw new Error(`am start отказал: ${errLine}\n${rawOut}`);
+  if (errLine) throw new Error(`am start refused: ${errLine}\n${rawOut}`);
 
   // 5. Status: ok или строки Status нет вовсе — подтверждаем по resumed, как в 1.2.4.
   await new Promise(r => setTimeout(r, 1200));
@@ -412,11 +413,11 @@ async function parseAmStartOutput(serial, out, ctx) {
 
   const head = `intent (action=${ctx.action}${ctx.pkg ? `, -p ${ctx.pkg}` : ''})`;
   if (okByResumed)
-    return text(`Launched через ${head}.\n${rawOut ? rawOut + '\n' : ''}Подтверждено на переднем плане: ${after.raw}`);
+    return text(`Launched via ${head}.\n${rawOut ? rawOut + '\n' : ''}Confirmed in the foreground: ${after.raw}`);
 
   return text(
-    `⚠ ${head} отправлен без ошибки, но на переднем плане нужного пакета нет.\n` +
-    `Сейчас наверху: ${after.raw || '(определить не удалось — ни ResumedActivity, ни mCurrentFocus)'}\n${rawOut}`);
+    `⚠ ${head} was sent without error, but the package is not in the foreground.\n` +
+    `On top now: ${after.raw || '(not determined - neither ResumedActivity nor mCurrentFocus)'}\n${rawOut}`);
 }
 
 /**
@@ -428,17 +429,17 @@ async function parseAmStartOutput(serial, out, ctx) {
  */
 async function actLaunchIntent(serial, args, packages) {
   if (packages.length > 1)
-    throw new Error(`action=launch с uri/intent_action принимает не больше одного пакета (для -p), получено: ${packages.join(', ')}`);
+    throw new Error(`action=launch with uri/intent_action accepts at most one package (used as -p), got: ${packages.join(', ')}`);
   const pkg = packages[0] || null;
 
   const action = String(args.intent_action || 'android.intent.action.VIEW');
   if (!AM_TOKEN_RE.test(action))
-    throw new Error(`intent_action «${action}» не проходит по шаблону [A-Za-z0-9_.]+`);
+    throw new Error(`intent_action \"${action}\" does not match [A-Za-z0-9_.]+`);
 
   if (CALL_ACTIONS.has(action) && !ALLOW_SHELL)
     throw new Error(
-      `intent_action=${action} отказан: allow_shell выключен в конфигурации аддона, а intent-запуск не должен ` +
-      `молча вернуть возможность звонить. Если это осознанно нужно — включи allow_shell и используй adb_shell.`);
+      `intent_action=${action} refused: the add-on option allow_shell is off. ` +
+      `Turn allow_shell on and use adb_shell if this is intended.`);
 
   const extraFlags = extrasToAmFlags(args.extras);
 
@@ -456,7 +457,7 @@ async function actLaunchIntent(serial, args, packages) {
     // сверке resumed вместо отказа. Другие сбои (устройство недоступно и
     // т.п.) пробрасываются — сверять resumed на мёртвом устройстве бессмысленно.
     if (!/timeout|killed/i.test(e.message)) throw e;
-    out = 'am -W не дождался ответа (таймаут вызова) — сверяю, что запустилось, по resumed activity.';
+    out = 'am -W did not answer in time (call timeout) - checking what started against the resumed activity.';
   }
 
   return parseAmStartOutput(serial, out, { pkg, action });
@@ -470,7 +471,7 @@ async function actLaunch(serial, args) {
   if (args.uri || args.intent_action) return actLaunchIntent(serial, args, packages);
 
   const pkg = packages[0];
-  if (!pkg) throw new Error('action=launch требует packages');
+  if (!pkg) throw new Error('action=launch requires packages');
   // Запуск пакета по имени — задача неожиданно склочная, и 1.2.3 переписала
   // её после охоты по живым устройствам (Shield, Fire OS, Android 16).
   //
@@ -494,7 +495,7 @@ async function actLaunch(serial, args) {
     const out = await adbSh(serial, `monkey -p ${sq(pkg)} -c ${cat} 1 2>&1 | tail -n 3`);
     if (/Events injected:\s*[1-9]/.test(out))
       return text(`Launched ${pkg} (monkey, ${cat.split('.').pop()})\n${out.trim()}`);
-    tried.push(`monkey ${cat.split('.').pop()}: не инжектил`);
+    tried.push(`monkey ${cat.split('.').pop()}: no events injected`);
   }
 
   // Фолбэк: спросить у системы имя главной активности и стартовать явно.
@@ -504,10 +505,10 @@ async function actLaunch(serial, args) {
                    '-a android.intent.action.MAIN']) {
     const r = (await adbSh(serial,
       `cmd package resolve-activity --brief ${q} ${sq(pkg)} 2>/dev/null | tail -n 1`)).trim();
-    if (!/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(r)) { tried.push(`resolve ${q}: ${r || 'пусто'}`); continue; }
+    if (!/^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(r)) { tried.push(`resolve ${q}: ${r || 'empty'}`); continue; }
     if (r.split('/')[0] !== pkg) {
       // ResolverActivity и прочие чужие активности — не наш пакет.
-      tried.push(`resolve ${q}: ${r} — активность ЧУЖОГО пакета, отброшена`);
+      tried.push(`resolve ${q}: ${r} - activity of another package, discarded`);
       continue;
     }
     act = r;
@@ -516,14 +517,14 @@ async function actLaunch(serial, args) {
 
   if (!act)
     throw new Error(
-      `Не удалось запустить ${pkg}: главная активность не определяется.\n` +
+      `Cannot launch ${pkg}: the main activity does not resolve.\n` +
       tried.map(t => `  · ${t}`).join('\n') +
-      `\nПосмотри \`adb_shell cmd package query-activities -a android.intent.action.MAIN\` — ` +
-      `возможно, у пакета нет запускаемой активности вовсе (сервис, провайдер, оверлей).`);
+      `\nTry \`adb_shell cmd package query-activities -a android.intent.action.MAIN\`; ` +
+      `the package may have no launchable activity at all (service, provider, overlay).`);
 
   const started = await adbSh(serial, `am start -n ${sq(act)} 2>&1`);
   if (/Error|Exception/i.test(started))
-    throw new Error(`Не удалось запустить ${pkg} через ${act}: ${started.trim()}`);
+    throw new Error(`Cannot launch ${pkg} via ${act}: ${started.trim()}`);
 
   // Не верим на слово ни monkey, ни am — сверяем, что поднялось на самом деле.
   //
@@ -541,23 +542,23 @@ async function actLaunch(serial, args) {
 
   if (resumed.includes(pkg) || focus.includes(pkg))
     return text(
-      `Launched ${pkg} через ${act} (monkey не сработал: ${tried[0]}).\n` +
-      `Пакет подтверждён на переднем плане.`);
+      `Launched ${pkg} via ${act} (monkey did not inject: ${tried[0]}).\n` +
+      `Package confirmed in the foreground.`);
 
   // Активность стартовала без ошибки, но наверху её нет. Чаще всего это
   // не гонка, а самозакрытие: мастера первичной настройки и подобные
   // экраны проверяют своё условие и сразу finish() — так ведёт себя
   // com.nvidia.shield.welcome на Shield. Гадать не будем, покажем факты.
   return text(
-    `⚠ ${pkg}: активность ${act} запущена без ошибки, но на переднем плане её НЕТ.\n` +
-    `Сейчас наверху: ${seen || '(определить не удалось — ни ResumedActivity, ни mCurrentFocus)'}\n` +
-    `Обычная причина — активность закрыла себя сама (мастер настройки, экран-заглушка), ` +
-    `реже приложению не хватило времени. Проверь adb_screenshot, если это важно.`);
+    `⚠ ${pkg}: activity ${act} started without error, but it is not in the foreground.\n` +
+    `On top now: ${seen || '(not determined - neither ResumedActivity nor mCurrentFocus)'}\n` +
+    `The usual cause is that the activity closed itself (setup wizard, placeholder screen); ` +
+    `less often it needed more time. Take adb_screenshot if this matters.`);
 }
 
 async function actStopOrClear(serial, args, action) {
   const packages = coerceArray(args.packages || args.package).filter(Boolean);
-  if (!packages.length) throw new Error(`action=${action} требует packages`);
+  if (!packages.length) throw new Error(`action=${action} requires packages`);
   const dryRun = coerceBool(args.dry_run, action === 'clear');  // clear стирает данные — по умолчанию dry_run
   const forceNetwork = coerceBool(args.force_network, false);
 
@@ -573,19 +574,19 @@ async function actStopOrClear(serial, args, action) {
   const guard = await networkGuard(serial, packages, action === 'stop' ? 'force-stop' : 'clear', forceNetwork);
 
   if (dryRun) {
-    return text(`dry_run: ${action} для ${packages.length} пакет(ов):\n` +
+    return text(`dry_run: ${action} for ${packages.length} package${packages.length === 1 ? '' : 's'}:\n` +
       packages.map(p => `  ${p}`).join('\n') +
       (guard.overridden.length
-        ? `\n\n⚠ force_network=true перекрывает сетевой гард для: ` +
+        ? `\n\n⚠ force_network=true overrides the network guard for: ` +
           guard.overridden.map(h => `${h.package} (${h.serving.join(', ')})`).join('; ')
         : '') +
       (guard.blind ? `\n\n⚠ ${guard.note}` : '') +
-      `\n\nПовтори с dry_run=false, чтобы применить.`);
+      `\n\nRepeat with dry_run=false to apply.`);
   }
 
   const done = [];
   if (guard.overridden.length)
-    done.push(`⚠ force_network=true: сетевой гард перекрыт для ` +
+    done.push(`⚠ force_network=true: the network guard is overridden for ` +
       guard.overridden.map(h => `${h.package} (${h.serving.join(', ')})`).join('; '));
   if (guard.blind) done.push(`⚠ ${guard.note}`);
 
@@ -602,16 +603,16 @@ async function actStopOrClear(serial, args, action) {
  */
 async function actRemove(serial, args) {
   const packages = coerceArray(args.packages || args.package).filter(Boolean);
-  if (!packages.length) throw new Error('action требует packages');
+  if (!packages.length) throw new Error('action requires packages');
 
   const mode = String(args.mode || 'disable').toLowerCase();
   if (!['disable', 'uninstall'].includes(mode))
-    throw new Error(`mode должен быть disable или uninstall, получено: ${mode}`);
+    throw new Error(`mode must be disable or uninstall, got: ${mode}`);
   if (mode === 'uninstall' && !ALLOW_UNINSTALL)
     throw new Error(
-      'mode=uninstall запрещён конфигурацией аддона (allow_uninstall: false). ' +
-      'Включи опцию в настройках аддона и перезапусти его, если действительно нужно удаление, ' +
-      'а не обратимое отключение (mode=disable).');
+      'mode=uninstall is forbidden by the add-on configuration (allow_uninstall: false). ' +
+      'Turn the option on in the add-on settings and restart it if removal is really needed ' +
+      'rather than reversible disabling (mode=disable).');
 
   const dryRun = coerceBool(args.dry_run, true);
   const doCanary = coerceBool(args.canary, true);
@@ -626,7 +627,7 @@ async function actRemove(serial, args) {
 
   const unknown = packages.filter(p => !pkgs.all.includes(p));
   if (unknown.length)
-    throw new Error(`Не установлены на устройстве: ${unknown.join(', ')}`);
+    throw new Error(`Not installed on the device: ${unknown.join(', ')}`);
 
   // Сетевой гард — ДО protected-набора: его отказ называет порт и живого
   // клиента, а не просто факт членства в списке. Снимок /proc/net берётся
@@ -636,10 +637,9 @@ async function actRemove(serial, args) {
   const hit = packages.filter(p => prot.packages.includes(p));
   if (hit.length)
     throw new Error(
-      `ОТКАЗ: в списке защищённые пакеты — ${hit.join(', ')}.\n` +
-      `Источники защиты: ${JSON.stringify(prot.sources)}\n` +
-      `Ничего не выполнено (целиком, а не частично). ` +
-      `Если уверен — убери их из списка вручную, обхода в инструменте нет.`);
+      `REFUSED: the list contains protected packages - ${hit.join(', ')}.\n` +
+      `Protection sources: ${JSON.stringify(prot.sources)}\n` +
+      `Nothing was applied. Remove them from the list by hand; the tool has no override.`);
 
   // Предупреждения по ПОЛЬЗОВАТЕЛЬСКИМ пакетам с признаками внешней
   // связности (слушающий сокет / аутентификатор аккаунта). Это НЕ
@@ -654,10 +654,10 @@ async function actRemove(serial, args) {
     already_disabled: pkgs.disabled.has(p),
     action: mode,
     warnings: advisories.filter(a => a.package === p).map(a => `${a.signal}: ${a.detail}`),
-    backup: doBackup && !pkgs.system.has(p) ? 'да (пользовательский пакет)'
-      : doBackup ? 'да (системный — APK сохраняется, но ставится обратно через install-existing)' : 'нет',
+    backup: doBackup && !pkgs.system.has(p) ? 'yes (user package)'
+      : doBackup ? 'yes (system package - the APK is saved, but it is restored via install-existing)' : 'no',
     rollback: mode === 'disable' ? 'pm enable'
-      : pkgs.system.has(p) ? 'cmd package install-existing' : 'установка из бэкапа APK',
+      : pkgs.system.has(p) ? 'cmd package install-existing' : 'install from the APK backup',
   }));
 
   const baseline = { accounts: await accountSnapshot(serial) };
@@ -677,13 +677,13 @@ async function actRemove(serial, args) {
       advisories,
       plan,
       hint: advisories.length
-        ? 'ЕСТЬ ПРЕДУПРЕЖДЕНИЯ — прочти advisories перед тем как продолжать. Повтори с dry_run=false. Откат: adb_app action=restore.'
-        : 'Повтори с dry_run=false. Откат: adb_app action=restore.',
+        ? 'Advisories present - read them before continuing. Repeat with dry_run=false. Rollback: adb_app action=restore.'
+        : 'Repeat with dry_run=false. Rollback: adb_app action=restore.',
     });
   }
 
   if (mode === 'uninstall' && !doBackup && !force)
-    throw new Error('mode=uninstall с backup=false требует force=true — иначе откат возможен не для всех пакетов');
+    throw new Error('mode=uninstall with backup=false requires force=true - otherwise rollback is not possible for every package');
 
   const state = readState(args, serial);
   const report = { mode, applied: [], failed: [], stopped: false, canary: [] };
@@ -702,7 +702,7 @@ async function actRemove(serial, args) {
           try {
             backupDir = (await backupPackage(serial, p, args, props)).dir;
           } catch (e) {
-            if (!force) throw new Error(`бэкап не удался (${e.message}) — прерываю, повтори с force=true, если это осознанно`);
+            if (!force) throw new Error(`backup failed (${e.message}) - stopping; repeat with force=true if this is intended`);
             backupDir = null;
           }
         }
@@ -739,7 +739,7 @@ async function actRemove(serial, args) {
             state.entries = state.entries.filter(x => x.package !== e.package);
             rolledBack.push(e.package);
           } catch (err) {
-            report.failed.push({ package: e.package, error: `откат не удался: ${err.message}` });
+            report.failed.push({ package: e.package, error: `rollback failed: ${err.message}` });
           }
         }
         writeState(args, serial, state);
@@ -752,8 +752,8 @@ async function actRemove(serial, args) {
   }
 
   report.state_file = statePath(args, serial);
-  report.next = 'Проверь устройство глазами: домашний экран, магазин, вход в аккаунт. ' +
-    'После ребута проверь ещё раз — часть отказов проявляется только на следующей загрузке.';
+  report.next = 'Check the device by eye: home screen, store, account sign-in. ' +
+    'Check again after a reboot - some failures only show up on the next boot.';
   return json(report);
 }
 
@@ -769,7 +769,7 @@ async function restoreEntry(serial, entry, args) {
     if (/Error|Failure/i.test(out)) throw new Error(out.trim());
     return out.trim();
   }
-  if (!entry.backup) throw new Error(`нет бэкапа APK для ${entry.package} — восстановить нечем`);
+  if (!entry.backup) throw new Error(`no APK backup for ${entry.package} - nothing to restore from`);
   return await installFromBackupDir(serial, entry.backup);
 }
 
@@ -789,11 +789,11 @@ async function actEnableOrRestore(serial, args, action) {
     targets = asked.length ? state.entries.filter(e => asked.includes(e.package)) : state.entries.slice();
     if (asked.length) {
       const missing = asked.filter(p => !state.entries.some(e => e.package === p));
-      if (missing.length) throw new Error(`Нет в снапшоте: ${missing.join(', ')}. Для прямого включения используй action=enable.`);
+      if (missing.length) throw new Error(`Not in the snapshot: ${missing.join(', ')}. Use action=enable for a direct enable.`);
     }
   }
 
-  if (!targets.length) return text('Снапшот пуст — восстанавливать нечего.');
+  if (!targets.length) return text('The snapshot is empty - nothing to restore.');
 
   if (dryRun) {
     return json({
@@ -803,9 +803,9 @@ async function actEnableOrRestore(serial, args, action) {
         package: e.package,
         was: e.mode,
         how: e.mode === 'disable' ? 'pm enable'
-          : e.system ? 'cmd package install-existing' : `установка из ${e.backup || '— бэкапа нет!'}`,
+          : e.system ? 'cmd package install-existing' : `install from ${e.backup || '(no backup)'}`,
       })),
-      hint: 'Повтори с dry_run=false.',
+      hint: 'Repeat with dry_run=false.',
     });
   }
 
@@ -831,12 +831,12 @@ async function actBackup(serial, args) {
   if (!packages.length) {
     if (scope === 'user') packages = pkgs.all.filter(p => !pkgs.system.has(p));
     else if (scope === 'all') packages = pkgs.all.slice();
-    else throw new Error('action=backup требует packages либо scope=user|all');
+    else throw new Error('action=backup requires packages or scope=user|all');
   }
 
   const dryRun = coerceBool(args.dry_run, false);
   if (dryRun) {
-    return text(`dry_run: будет сохранено ${packages.length} пакет(ов) в ` +
+    return text(`dry_run: ${packages.length} package${packages.length === 1 ? '' : 's'} will be saved to ` +
       `${path.join(deviceDir(args, serial), 'apk')}:\n` + packages.map(p => `  ${p}`).join('\n'));
   }
 
@@ -894,8 +894,8 @@ async function adbApp(args) {
       return json({ device: props, ...prot });
     }
     default:
-      throw new Error(`Неизвестный action: ${action || '(пусто)'}. ` +
-        `Допустимые: list, info, protected, launch, stop, clear, disable, uninstall, enable, restore, backup, state`);
+      throw new Error(`Unknown action: ${action || '(empty)'}. ` +
+        `Allowed: list, info, protected, launch, stop, clear, disable, uninstall, enable, restore, backup, state`);
   }
 }
 

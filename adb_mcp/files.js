@@ -66,16 +66,16 @@ function findEOCD(buf) {
 /** Перечислить записи ZIP по центральному каталогу. */
 function zipEntries(buf) {
   const eocd = findEOCD(buf);
-  if (eocd < 0) throw new Error('не похоже на ZIP: не найден End of Central Directory');
+  if (eocd < 0) throw new Error('not a ZIP: End of Central Directory not found');
   const count = buf.readUInt16LE(eocd + 10);
   let off = buf.readUInt32LE(eocd + 16);
   if (off === 0xffffffff || count === 0xffff)
-    throw new Error('ZIP64-бандлы не поддерживаются');
+    throw new Error('ZIP64 bundles are not supported');
 
   const entries = [];
   for (let i = 0; i < count; i++) {
     if (buf.readUInt32LE(off) !== 0x02014b50)
-      throw new Error(`повреждён центральный каталог ZIP на записи ${i}`);
+      throw new Error(`corrupt ZIP central directory at entry ${i}`);
     const method = buf.readUInt16LE(off + 10);
     const compSize = buf.readUInt32LE(off + 20);
     const size = buf.readUInt32LE(off + 24);
@@ -92,14 +92,14 @@ function zipEntries(buf) {
 
 function zipRead(buf, e) {
   if (buf.readUInt32LE(e.local) !== 0x04034b50)
-    throw new Error(`повреждён локальный заголовок: ${e.name}`);
+    throw new Error(`corrupt local header: ${e.name}`);
   const nameLen = buf.readUInt16LE(e.local + 26);
   const extraLen = buf.readUInt16LE(e.local + 28);
   const start = e.local + 30 + nameLen + extraLen;
   const raw = buf.subarray(start, start + e.compSize);
   if (e.method === 0) return raw;
   if (e.method === 8) return zlib.inflateRawSync(raw);
-  throw new Error(`неподдерживаемый метод сжатия ${e.method} у ${e.name}`);
+  throw new Error(`unsupported compression method ${e.method} in ${e.name}`);
 }
 
 // ──────────────────── классификация и выбор сплитов ────────────────────
@@ -155,10 +155,10 @@ function chooseSplits(names, props, opts = {}) {
   const universal = names.find(n => /(^|\/)universal\.apk$/i.test(n));
   const hasSplits = items.some(i => ['abi', 'density', 'locale'].includes(i.kind));
   if (universal && !hasSplits) {
-    return { chosen: [universal], notes: ['в бандле только universal.apk — ставится как обычный APK'], items };
+    return { chosen: [universal], notes: ['bundle holds only universal.apk - installed as a plain APK'], items };
   }
 
-  if (!bases.length) throw new Error('в бандле не найден базовый APK (base/master/<пакет>.apk)');
+  if (!bases.length) throw new Error('no base APK in the bundle (base/master/<package>.apk)');
   // Все master-модули (feature modules времени установки) идут целиком
   chosen.push(...bases.map(b => b.name));
 
@@ -170,12 +170,12 @@ function chooseSplits(names, props, opts = {}) {
     if (!hit) {
       throw new Error(
         (opts.abi
-          ? `в бандле нет сплита под запрошенный ABI «${opts.abi}» (устройство сообщает: ${(props.abilist || []).join(', ') || 'ABI не определён'}). `
-          : `в бандле нет сплита ни под один ABI устройства (${(props.abilist || []).join(', ') || 'ABI не определён'}). `) +
-        `Есть: ${abiItems.map(i => i.value).join(', ')}. Установка отменена — неверный ABI даёт неработающее приложение.`);
+          ? `no split for ABI "${opts.abi}" (device reports: ${(props.abilist || []).join(', ') || 'ABI unknown'}). `
+          : `no split for any ABI of the device (${(props.abilist || []).join(', ') || 'ABI unknown'}). `) +
+        `Available: ${abiItems.map(i => i.value).join(', ')}. Install cancelled.`);
     }
     chosen.push(hit.name);
-    notes.push(`ABI: ${hit.value} (устройство: ${(props.abilist || []).join(', ')})`);
+    notes.push(`ABI: ${hit.value} (device: ${(props.abilist || []).join(', ')})`);
   }
 
   // ── Плотность: промах не фатален, ресурс возьмётся из базы ──
@@ -183,7 +183,7 @@ function chooseSplits(names, props, opts = {}) {
   if (densItems.length) {
     const target = Number(opts.density || props.density) || null;
     if (!target) {
-      notes.push('плотность устройства не определена — сплит плотности пропущен (ресурсы возьмутся из базового APK)');
+      notes.push('device density not determined - density split skipped (resources come from the base APK)');
     } else {
       let best = null, bestDelta = Infinity;
       for (const i of densItems) {
@@ -192,8 +192,8 @@ function chooseSplits(names, props, opts = {}) {
       }
       chosen.push(best.name);
       notes.push(bestDelta === 0
-        ? `плотность: ${best.value} (${target} dpi, точное совпадение)`
-        : `плотность: ${best.value} — точной корзины под ${target} dpi в бандле нет, взята ближайшая (промах по плотности не фатален)`);
+        ? `density: ${best.value} (${target} dpi, exact match)`
+        : `density: ${best.value} - no exact bucket for ${target} dpi in the bundle, nearest used (a density mismatch is not fatal)`);
     }
   }
   for (const i of items.filter(i => i.kind === 'density_any')) chosen.push(i.name);
@@ -211,14 +211,14 @@ function chooseSplits(names, props, opts = {}) {
     const picked = locItems.filter(i => wanted.has(String(i.value).split(/[-_]/)[0].toLowerCase()));
     chosen.push(...picked.map(i => i.name));
     if (picked.length)
-      notes.push(`локали: ${picked.map(i => i.value).join(', ')} (язык устройства: ${devLang || '?'})`);
+      notes.push(`locales: ${picked.map(i => i.value).join(', ')} (device language: ${devLang || '?'})`);
     else
-      notes.push(`локали: подходящего сплита нет (язык устройства: ${devLang || '?'}; в бандле: ${locItems.map(i => i.value).join(', ')}) — строки возьмутся из базового APK`);
+      notes.push(`locales: no matching split (device language: ${devLang || '?'}; bundle has: ${locItems.map(i => i.value).join(', ')}) - strings come from the base APK`);
   }
 
   const unknown = items.filter(i => i.kind === 'unknown');
   if (unknown.length)
-    notes.push(`не распознаны и пропущены: ${unknown.map(i => i.value).join(', ')}`);
+    notes.push(`not recognised, skipped: ${unknown.map(i => i.value).join(', ')}`);
 
   return { chosen: Array.from(new Set(chosen)), notes, items };
 }
@@ -227,7 +227,7 @@ function chooseSplits(names, props, opts = {}) {
 function unpackBundle(bundlePath, props, opts) {
   const buf = fs.readFileSync(bundlePath);
   const entries = zipEntries(buf).filter(e => /\.apk$/i.test(e.name) && !e.name.endsWith('/'));
-  if (!entries.length) throw new Error('в бандле нет ни одного .apk');
+  if (!entries.length) throw new Error('no .apk inside the bundle');
 
   // standalones/ — сборки под старые устройства без поддержки сплитов;
   // при наличии обычных splits/ они только мешают выбору.
@@ -264,14 +264,14 @@ async function install(args) {
       tmp = unpackBundle(bundle, props, { abi: args.abi, density: args.density, locales: args.locales });
 
       const head =
-        `Бандл: ${path.basename(bundle)} (${tmp.total} apk внутри)\n` +
-        `Устройство: SDK ${props.sdk}, ABI ${(props.abilist || []).join(',') || '?'}, ` +
-        `${props.density || '?'} dpi, локаль ${props.locale || '?'}\n` +
-        `Выбрано ${tmp.files.length}: ${tmp.files.map(f => path.basename(f)).join(', ')}\n` +
+        `Bundle: ${path.basename(bundle)} (${tmp.total} apk inside)\n` +
+        `Device: SDK ${props.sdk}, ABI ${(props.abilist || []).join(',') || '?'}, ` +
+        `${props.density || '?'} dpi, locale ${props.locale || '?'}\n` +
+        `Chose ${tmp.files.length}: ${tmp.files.map(f => path.basename(f)).join(', ')}\n` +
         tmp.notes.map(n => `  · ${n}`).join('\n');
 
       if (args.dry_run === true || args.dry_run === 'true')
-        return text(`${head}\n\ndry_run — ничего не установлено. Повтори с dry_run=false.`);
+        return text(`${head}\n\ndry_run - nothing installed. Repeat with dry_run=false.`);
 
       const verb = tmp.files.length > 1 ? 'install-multiple' : 'install';
       const out = await adb(withSerial(args.serial, [verb, '-r', '-t', '-g', ...tmp.files]), { timeout: 300000 });
