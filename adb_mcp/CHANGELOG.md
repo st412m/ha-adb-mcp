@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.0 — 2026-09-30
+
+`adb_install` reports before it installs, and every tool tells the client how careful to be.
+
+### Added
+- Every tool carries a `title` and MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, all explicit), so a client can decide which calls to confirm.
+- `initialize` answers with the client's protocol version when it is one of `2025-06-18`, `2025-03-26`, `2024-11-05`, and with `2025-06-18` otherwise; it always answered `2024-11-05` before.
+
+### Changed
+- **`adb_install` defaults to `dry_run=true`.** A call without `dry_run` reports the files, the device and the command and installs nothing; only `dry_run=false` installs. The report says so when the argument was omitted.
+- The `adb_app` protected-set refusal names each rejected package with its own sources, instead of dumping every source as JSON. The first and last lines are unchanged.
+- `Accept: */*` and `application/*` are accepted; the 406 text now says what is actually required.
+- `adb_text`'s description tells the assistant not to retry a wrong password or PIN.
+
+### Fixed
+- `dry_run` on a single APK or a list of splits was ignored and the app was installed; it now reports like a bundle does.
+- An ADB call that fails with nothing on stderr says what happened — timeout, signal, exit code, output limit or failed start — instead of a bare `Command failed` with the full command line.
+- A screenshot that timed out left its temporary directory behind in the container.
+
 ## 1.3.1 — 2026-09-22
 
 Every string the tools return is English; documentation split into `README.md` + `docs/`.

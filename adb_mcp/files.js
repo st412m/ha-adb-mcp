@@ -249,9 +249,35 @@ function unpackBundle(bundlePath, props, opts) {
   return { dir, files, notes: sel.notes, total: usable.length };
 }
 
+/**
+ * 1.4.0: разбор dry_run у adb_install. Ставит ТОЛЬКО явный false — булев или
+ * строка "false" (клиенты, сериализующие булевы строкой); всё прочее, включая
+ * отсутствие параметра, — отчёт без установки. coerceBool тут не годится: он
+ * превращает в false всё, что не "true", и `1`, "0", "yes" запустили бы
+ * установку. implicit — параметр не передан вовсе (строка про умолчание 1.4.0).
+ */
+function installDryRun(v) {
+  const implicit = v === undefined || v === null || v === '';
+  const explicitFalse = v === false || (typeof v === 'string' && v.trim().toLowerCase() === 'false');
+  return { dryRun: !explicitFalse, implicit };
+}
+
+const DRY_RUN_TAIL = 'dry_run - nothing installed. Repeat with dry_run=false.';
+const DRY_RUN_DEFAULT_NOTE = 'dry_run was not passed - since 1.4.0 adb_install only reports unless dry_run=false.';
+
+function dryRunFooter(dr) {
+  return (dr.implicit ? `${DRY_RUN_DEFAULT_NOTE}\n` : '') + DRY_RUN_TAIL;
+}
+
+function deviceLine(props) {
+  return `Device: SDK ${props.sdk}, ABI ${(props.abilist || []).join(',') || '?'}, ` +
+    `${props.density || '?'} dpi, locale ${props.locale || '?'}`;
+}
+
 async function install(args) {
   const rawPaths = coerceArray(args.apk_path).filter(p => typeof p === 'string' && p.trim() !== '');
   if (rawPaths.length === 0) throw new Error('apk_path is empty');
+  const dr = installDryRun(args.dry_run);
 
   // ── Бандл `.apks` ──
   if (rawPaths.length === 1 && BUNDLE_EXT.test(rawPaths[0])) {
@@ -265,13 +291,12 @@ async function install(args) {
 
       const head =
         `Bundle: ${path.basename(bundle)} (${tmp.total} apk inside)\n` +
-        `Device: SDK ${props.sdk}, ABI ${(props.abilist || []).join(',') || '?'}, ` +
-        `${props.density || '?'} dpi, locale ${props.locale || '?'}\n` +
+        `${deviceLine(props)}\n` +
         `Chose ${tmp.files.length}: ${tmp.files.map(f => path.basename(f)).join(', ')}\n` +
         tmp.notes.map(n => `  · ${n}`).join('\n');
 
-      if (args.dry_run === true || args.dry_run === 'true')
-        return text(`${head}\n\ndry_run - nothing installed. Repeat with dry_run=false.`);
+      if (dr.dryRun)
+        return text(`${head}\n\n${dryRunFooter(dr)}`);
 
       const verb = tmp.files.length > 1 ? 'install-multiple' : 'install';
       const out = await adb(withSerial(args.serial, [verb, '-r', '-t', '-g', ...tmp.files]), { timeout: 300000 });
@@ -288,6 +313,20 @@ async function install(args) {
     return r;
   });
   const verb = apks.length > 1 ? 'install-multiple' : 'install';
+
+  // 1.4.0: до этой правки dry_run здесь молча игнорировался и шла реальная
+  // установка (приёмка 1.3.1: APK встал на Shield при dry_run=true). Пути
+  // проверены выше, так что отчёт и установка отказывают одинаково.
+  if (dr.dryRun) {
+    const props = await getProps(args.serial);
+    const lines = apks.map(p => `  ${p} (${fs.statSync(p).size} bytes)`);
+    return text(
+      `APK: ${apks.length} file${apks.length === 1 ? '' : 's'}\n${lines.join('\n')}\n` +
+      `${deviceLine(props)}\n` +
+      `Would run: ${verb} -r -t -g ${apks.map(p => path.basename(p)).join(' ')} ` +
+      `on ${args.serial || 'the only connected device'}\n\n${dryRunFooter(dr)}`);
+  }
+
   const out = await adb(withSerial(args.serial, [verb, '-r', '-t', '-g', ...apks]), { timeout: 180000 });
   return text(out.trim() || `${verb}: ${apks.length} file(s) OK`);
 }
@@ -323,4 +362,6 @@ async function pull(args) {
 module.exports = {
   install, uninstall, push, pull,
   zipEntries, zipRead, qualifierOf, classify, chooseSplits,
+  // 1.4.0: для проверки разбора dry_run без устройства.
+  installDryRun, DRY_RUN_TAIL, DRY_RUN_DEFAULT_NOTE,
 };

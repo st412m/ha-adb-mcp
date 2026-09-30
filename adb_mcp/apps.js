@@ -44,6 +44,7 @@ const {
 const {
   getProps, listPackages, accountSnapshot, protectedSet,
   netListeners, servingHits, servingRefusal, resumedActivity,
+  CORE_PROTECTED, CORE_PREFIXES,
 } = require('./device.js');
 
 const ALLOW_UNINSTALL = process.env.ALLOW_UNINSTALL === 'true';
@@ -599,6 +600,57 @@ async function actStopOrClear(serial, args, action) {
 }
 
 /**
+ * 1.4.0: откуда пакет попал в protected-набор — по ключам `sources`
+ * (protectedSet в device.js). Строка — пакет целиком, массив — среди
+ * элементов, объект — среди ключей; roles дополняется именами ролей из
+ * roles_detail. Ядро набора (CORE_PROTECTED / CORE_PREFIXES) ни в одном
+ * ключе sources не лежит, поэтому метится отдельно: `core` и
+ * `core (<префикс>*)`.
+ */
+function protectedSourcesOf(pkg, sources) {
+  const src = sources || {};
+  const found = [];
+  for (const [key, val] of Object.entries(src)) {
+    if (key === 'roles_detail') continue;
+    let hit = false;
+    if (typeof val === 'string') hit = val === pkg;
+    else if (Array.isArray(val)) hit = val.includes(pkg);
+    else if (val && typeof val === 'object') hit = Object.prototype.hasOwnProperty.call(val, pkg);
+    if (!hit) continue;
+    if (key === 'roles') {
+      const names = Object.entries(src.roles_detail || {})
+        .filter(([, holders]) => Array.isArray(holders) && holders.includes(pkg))
+        .map(([role]) => role);
+      found.push(names.length ? `roles (${names.join(', ')})` : 'roles');
+    } else {
+      found.push(key);
+    }
+  }
+  if (CORE_PROTECTED.includes(pkg)) found.push('core');
+  for (const pref of CORE_PREFIXES) {
+    if (pkg.startsWith(pref)) found.push(`core (${pref}*)`);
+  }
+  return found;
+}
+
+/**
+ * 1.4.0: текст отказа по protected-набору. Первая и последняя строки — байт в
+ * байт как до 1.4.0 (на них опираются документация и привычка агента).
+ * Между ними — по строке на отклонённый пакет с ЕГО источниками; прочие
+ * источники набора сюда не попадают (раньше уходил весь JSON sources).
+ */
+function formatProtectedRefusal(hit, sources) {
+  return (
+    `REFUSED: the list contains protected packages - ${hit.join(', ')}.\n` +
+    hit.map(p => {
+      const from = protectedSourcesOf(p, sources);
+      return `  ${p} — ${from.length ? from.join(', ') : 'source not recorded'}`;
+    }).join('\n') + '\n' +
+    'The full set with every source: adb_app action=protected\n' +
+    'Nothing was applied. Remove them from the list by hand; the tool has no override.');
+}
+
+/**
  * disable / uninstall — единственное по-настоящему опасное действие.
  */
 async function actRemove(serial, args) {
@@ -635,11 +687,7 @@ async function actRemove(serial, args) {
   const guard = await networkGuard(serial, packages, mode, forceNetwork, prot.net);
 
   const hit = packages.filter(p => prot.packages.includes(p));
-  if (hit.length)
-    throw new Error(
-      `REFUSED: the list contains protected packages - ${hit.join(', ')}.\n` +
-      `Protection sources: ${JSON.stringify(prot.sources)}\n` +
-      `Nothing was applied. Remove them from the list by hand; the tool has no override.`);
+  if (hit.length) throw new Error(formatProtectedRefusal(hit, prot.sources));
 
   // Предупреждения по ПОЛЬЗОВАТЕЛЬСКИМ пакетам с признаками внешней
   // связности (слушающий сокет / аутентификатор аккаунта). Это НЕ
@@ -903,4 +951,6 @@ module.exports = {
   adbApp, ALLOW_UNINSTALL, DEFAULT_STORE,
   // 1.3.0: экспортируется для юнит-проверок без устройства (§4 спеки).
   parseAmStartOutput, extrasToAmFlags, CALL_ACTIONS, AM_TOKEN_RE,
+  // 1.4.0: формат отказа по protected-набору — проверка без устройства.
+  protectedSourcesOf, formatProtectedRefusal,
 };

@@ -93,12 +93,27 @@ function logTool(name, args, t0, outcome) {
   console.log(`[tool] ${new Date().toISOString()} ${name} ${fmtArgs(name, args)} -> ${outcome} ${Date.now() - t0}ms`);
 }
 
+/**
+ * 1.4.0: согласование версии протокола (lifecycle MCP). Клиенту, который
+ * прислал поддерживаемую версию, отвечаем ею же; иначе — самой новой из
+ * поддерживаемых. До 1.4.0 всегда уходило 2024-11-05, и клиент вправе был не
+ * читать title и annotations тулов (они появились в 2025-03-26 / 2025-06-18).
+ * Для 2025-06-18 транспорт менять не нужно: POST уже отвечает обычным JSON,
+ * сессии необязательны. Пакетные запросы продолжают приниматься ради старых
+ * клиентов.
+ */
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+function negotiateProtocolVersion(requested) {
+  return SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0];
+}
+
 async function handleMcpRequest(body) {
   const { id, method, params } = body;
 
   if (method === 'initialize') {
     return { jsonrpc: '2.0', id, result: {
-      protocolVersion: '2024-11-05',
+      protocolVersion: negotiateProtocolVersion(params && params.protocolVersion),
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: 'adb-mcp-server', version: VERSION }
     }};
@@ -129,6 +144,21 @@ async function handleMcpRequest(body) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
+/**
+ * 1.4.0: разбор Accept по медиатипам, а не поиском подстроки. До 1.4.0
+ * клиент с подстановочным Accept (любой тип) получал 406, а текст 406
+ * («must accept both») не совпадал с проверкой, которой хватало любого из
+ * двух. Параметры (`;q=…`) отбрасываются. Пустой или отсутствующий Accept —
+ * по-прежнему 406.
+ */
+const ACCEPTED_MEDIA = new Set(['application/json', 'text/event-stream', 'application/*', '*/*']);
+
+function acceptsMcp(header) {
+  return String(header || '').split(',')
+    .map(part => part.split(';')[0].trim().toLowerCase())
+    .some(type => ACCEPTED_MEDIA.has(type));
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
@@ -138,10 +168,9 @@ const server = http.createServer(async (req, res) => {
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }
   if (req.method !== 'POST') { res.writeHead(405, { 'Allow': 'POST, OPTIONS' }); res.end(); return; }
 
-  const accept = req.headers['accept'] || '';
-  if (!accept.includes('application/json') && !accept.includes('text/event-stream')) {
+  if (!acceptsMcp(req.headers['accept'])) {
     res.writeHead(406);
-    res.end(JSON.stringify({ error: 'Not Acceptable: Client must accept both application/json and text/event-stream' }));
+    res.end(JSON.stringify({ error: 'Not Acceptable: Accept must include application/json or text/event-stream' }));
     return;
   }
 
@@ -179,4 +208,7 @@ if (require.main === module) {
   });
 }
 
-module.exports = { fmtArgs, redact, maskArgs, fmtOutcome, handleMcpRequest };
+module.exports = {
+  fmtArgs, redact, maskArgs, fmtOutcome, handleMcpRequest,
+  acceptsMcp, negotiateProtocolVersion, SUPPORTED_PROTOCOL_VERSIONS,
+};

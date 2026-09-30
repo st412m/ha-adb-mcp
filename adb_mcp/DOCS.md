@@ -98,7 +98,7 @@ The token in the path is the only authentication layer.
 
 **Apps and files**
 
-- `adb_install` — install one `.apk`, a split set, or one `.apks`/`.xapk`/`.apkm` bundle
+- `adb_install` — install one `.apk`, a split set, or one `.apks`/`.xapk`/`.apkm` bundle; by default it only reports, `dry_run=false` installs
 - `adb_uninstall` — uninstall by package name
 - `adb_app` — package operations with guard rails: list, launch, stop, clear, disable, uninstall, back up, restore
 - `adb_push` — copy a file from `/media` or `/share` to the device
@@ -139,8 +139,8 @@ could not be read, so the action ran without the check).
 screen, then reconnect:
 
 ```
-adb_disconnect host=192.168.1.50
-adb_connect host=192.168.1.50
+adb_disconnect host=192.0.2.50
+adb_connect host=192.0.2.50
 ```
 
 **A phone or watch stopped connecting.** Its Wireless Debugging port changed after a reboot.

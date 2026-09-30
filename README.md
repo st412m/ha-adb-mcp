@@ -40,8 +40,8 @@ In the **ADB MCP Server** card: **Install**, set a long random `token` in Config
 ```yaml
 token: "your-long-random-token"
 devices:
-  - "192.168.1.50"        # port 5555 implied
-  - "192.168.1.51:5555"
+  - "192.0.2.50"          # port 5555 implied
+  - "192.0.2.51:5555"
 allow_shell: true
 allow_uninstall: false
 log_requests: false
@@ -99,7 +99,7 @@ https://your-domain/private_<token>/mcp
 
 **Apps and files**
 
-- `adb_install` — install one `.apk`, a split set, or one `.apks`/`.xapk`/`.apkm` bundle
+- `adb_install` — install one `.apk`, a split set, or one `.apks`/`.xapk`/`.apkm` bundle; by default it only reports, `dry_run=false` installs
 - `adb_uninstall` — uninstall by package name
 - `adb_app` — package operations with guard rails: list, launch, stop, clear, disable, uninstall, back up, restore
 - `adb_push` — copy a file from `/media` or `/share` to the device

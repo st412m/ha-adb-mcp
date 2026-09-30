@@ -78,6 +78,10 @@ adb_app action=protected
 
 shows the whole derived set and the `notes` for any source that could not be read.
 
+## A call fails with `timed out after N s`
+
+`adb shell timed out after 30 s and was killed (SIGTERM)` means the ADB call hit its time limit and printed nothing before that. Per-tool limits are listed in [tools.md](tools.md#timeouts-and-failure-behaviour); for `adb_shell`, raise the limit with `timeout_sec` (at most 120 s), or background the work on the device and poll for it.
+
 ## The connector times out on a long call
 
 The reverse proxy gives up before the add-on does on transfers and installs. Background long shell work on the device and poll for it, rather than blocking a single call.

@@ -163,7 +163,10 @@ function screenshotPipeline(serial, px, q) {
     const sArg = serial ? `-s ${sqq(serial)} ` : '';
     const cmd =
       `IM=convert; command -v magick >/dev/null 2>&1 && IM=magick; ` +
-      `T=$(mktemp -d) || exit 96; trap 'rm -rf "$T"' EXIT; ` +
+      // 1.4.0: busybox ash не выполняет EXIT-ловушку при смерти от сигнала —
+      // на таймауте (SIGTERM от execFile) каталог в /tmp контейнера оставался.
+      // Ловушка на сигналы превращает их в обычный exit, и EXIT срабатывает.
+      `T=$(mktemp -d) || exit 96; trap 'rm -rf "$T"' EXIT; trap 'exit 143' TERM INT HUP; ` +
       // §2 (приёмка 18.09): wm size — СВЕЖИЙ на каждый снимок, не кешируется:
       // Override меняется на лету (переключение режима дисплея под контент
       // на Shield), соотношение кадр/ввод непостоянно даже между двумя

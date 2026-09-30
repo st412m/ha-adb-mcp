@@ -2,6 +2,10 @@
 
 Full semantics of every tool: arguments that change behaviour, guard rails, refusal rules, timeouts.
 
+## Read-only and destructive tools
+
+Every tool carries marks that tell the client how careful to be before running it. `adb_devices`, `adb_screenshot`, `adb_ui_dump` and `adb_logcat` are marked read-only, so a client may run them without asking. `adb_shell`, `adb_install`, `adb_uninstall`, `adb_push`, `adb_pull` and `adb_app` are marked destructive: they can run anything on the device, replace or remove apps, or overwrite files on either side, and a client that honours the marks asks for confirmation first. The connection tools and the input tools (`adb_tap`, `adb_swipe`, `adb_key`, `adb_text`, `adb_find_and_tap`) change state but destroy nothing by themselves, so they are marked neither. What a client does with the marks is its own choice; the add-on's guard rails below apply either way.
+
 ## Timeouts and failure behaviour
 
 Every ADB invocation runs under a hard timeout and is killed when it expires, so a device that sleeps, reboots or drops off the network fails the call instead of hanging it. The error comes back as a normal MCP tool result with `isError: true` and a text message.
@@ -38,17 +42,33 @@ Chose 3: com.lonelycatgames.Xplore.apk, config.armeabi_v7a.apk, config.xhdpi.apk
   · ABI: armeabi-v7a (device: armeabi-v7a, armeabi)
   · density: xhdpi (320 dpi, exact match)
   · locales: no matching split (device language: en; bundle has: ru) - strings come from the base APK
+
+dry_run - nothing installed. Repeat with dry_run=false.
 ```
 
 The bundle is unpacked add-on side with Node's own `zlib`, so the device needs nothing. Splits are chosen from device properties read live: `ro.product.cpu.abilist`, `wm density`, `persist.sys.locale`. Three naming conventions are recognised — bundletool (`splits/base-master.apk`, `base-arm64_v8a.apk`), APKMirror-style (`<package>.apk` + `config.arm64_v8a.apk`) and device-pulled (`base.apk` + `split_config.arm64_v8a.apk`).
 
 A wrong ABI is refused; a wrong density is not. An ABI mismatch leaves an app that will not start, so a bundle with no split for any of the device's ABIs is an error and nothing is installed. Density splits fail softly, so the nearest bucket is used and the mismatch is reported. Do not infer the ABI from the SoC or the Android version: Android TV boxes often run a 32-bit userland on 64-bit silicon.
 
-Bundle-only arguments: `dry_run`, `abi`, `density`, `locales`. `locales` adds language splits beyond the device language.
+Bundle-only arguments: `abi`, `density`, `locales`. `locales` adds language splits beyond the device language.
 
 ```
-adb_install apk_path="/media/apk/X-plore.apks" locales=["ru"]
+adb_install apk_path="/media/apk/X-plore.apks" locales=["ru"] dry_run=false
 ```
+
+`dry_run` works for every form of `apk_path`. Since 1.4.0 it defaults to `true`: a call without it only reports what would be installed, and the install happens only with `dry_run=false`. For a single APK or a list of splits the report names each file with its size, the device and the command:
+
+```
+APK: 1 file
+  /media/apk/demo.apk (12345 bytes)
+Device: SDK 30, ABI arm64-v8a,armeabi-v7a, 320 dpi, locale en-US
+Would run: install -r -t -g demo.apk on the only connected device
+
+dry_run was not passed - since 1.4.0 adb_install only reports unless dry_run=false.
+dry_run - nothing installed. Repeat with dry_run=false.
+```
+
+The `dry_run was not passed` line appears only when the argument is missing. Only `false` installs; `"0"`, `"no"` or any other value gets the report.
 
 Arrays of individual split paths work unchanged. To restore an app after a factory reset, `pm path <pkg>` on a working device lists the exact split set: `adb_pull` those and pass them back as an array.
 
@@ -167,11 +187,13 @@ adb_app action=restore                                          # undo everythin
 ### The safety model
 
 - **Everything that changes state defaults to `dry_run: true`.** The plan names the rollback path for each package and lists any advisories. Set `dry_run=false` to apply.
-- **The protected set is derived from the device.** Current launcher, active IME, package installer, WebView provider, role holders where the OS exposes them, and account/registration packages. Any overlap aborts the whole call, and there is no override flag:
+- **The protected set is derived from the device.** Current launcher, active IME, package installer, WebView provider, role holders where the OS exposes them, and account/registration packages. Any overlap aborts the whole call, and there is no override flag. The refusal names each rejected package with the sources it came from; `core` marks the small built-in core of the set:
 
 ```
-REFUSED: the list contains protected packages - com.example.one, com.example.two.
-Protection sources: {"launcher":"..."}
+REFUSED: the list contains protected packages - com.example.launcher, com.example.remote.
+  com.example.launcher — launcher, roles (HOME)
+  com.example.remote — roles (SYSTEM_TELEVISION_REMOTE_SERVICE), net_listener
+The full set with every source: adb_app action=protected
 Nothing was applied. Remove them from the list by hand; the tool has no override.
 ```
 
@@ -179,7 +201,7 @@ Nothing was applied. Remove them from the list by hand; the tool has no override
 
 ```
 REFUSED (disable): the package is currently serving a client outside the device.
-  · com.example.remote - listening on ports 6466, 6467, currently serving 192.168.1.52 -> :6466
+  · com.example.remote - listening on ports 6466, 6467, currently serving 192.0.2.52 -> :6466
 Nothing was applied. Repeat with force_network: true to override; `force` does not lift this guard.
 ```
 
@@ -236,6 +258,8 @@ adb_shell ime enable com.android.adbkeyboard/.AdbIME
 ```
 
 Without it, non-ASCII input fails with an error carrying these instructions; ASCII always works. `com.android.adbkeyboard` is part of the derived protected set, so `adb_app` will not disable the channel `adb_text` depends on.
+
+`adb_text` tells the assistant never to retry a wrong password or PIN, since a few failed attempts can lock the account or the device, and to stop and ask instead.
 
 ## Session and transfer tools
 

@@ -33,6 +33,46 @@ function friendlyAdbError(msg) {
   return msg;
 }
 
+/**
+ * 1.4.0: текст ошибки adb — чистая функция, проверяется `node -e` без adb.
+ *
+ * Непустой stderr — как было (stderr + хвост stdout). При ПУСТОМ stderr
+ * раньше уходил `err.message`, то есть `Command failed: adb <весь argv>`:
+ * агент не узнавал, что случилось (таймаут? kill?), а argv нёс аргументы
+ * вызова. Теперь текст строится из полей execFile и называет только
+ * подкоманду adb, а не argv. redact() в server.js остаётся вторым слоем.
+ *
+ * maxBuffer проверяется ПЕРВЫМ: Node 22 отдаёт его строковым кодом
+ * ERR_CHILD_PROCESS_STDIO_MAXBUFFER без `killed`, и
+ * без отдельной ветки он читался бы как «adb could not start».
+ */
+function describeAdbFailure(err, stderr, stdout, args, opts = {}) {
+  let msg = (stderr || '').toString().trim();
+  const out = opts.binary ? '' : (stdout || '').toString().trim();
+  if (!msg) {
+    const a = args || [];
+    const sub = (a[0] === '-s' ? a[2] : a[0]) || '(no subcommand)';
+    const e = err || {};
+    const secs = +((opts.timeout || ADB_TIMEOUT_MS) / 1000).toFixed(3);
+    if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+      msg = `adb ${sub} output exceeded ${ADB_MAX_BUFFER / 1024 / 1024} MB and was killed`;
+    else if (e.killed === true)
+      msg = `adb ${sub} timed out after ${secs} s and was killed${e.signal ? ` (${e.signal})` : ''}`;
+    else if (e.signal)
+      msg = `adb ${sub} was terminated by ${e.signal}`;
+    else if (typeof e.code === 'number')
+      msg = out ? `adb ${sub} exited with code ${e.code}` : `adb ${sub} exited with code ${e.code} and printed nothing`;
+    else if (typeof e.code === 'string')
+      msg = `adb could not start: ${e.code}`;
+    else
+      msg = `adb ${sub} failed without output`;
+  }
+  // v0.3.2: не терять stdout при exit!=0 — при отладке shell-пайплайнов
+  // сообщение об ошибке без вывода команды бесполезно.
+  if (out) msg = `${msg}\nstdout (tail): ${out.slice(-2000)}`;
+  return friendlyAdbError(msg);
+}
+
 function adb(args, opts = {}) {
   return new Promise((resolve, reject) => {
     execFile('adb', args, {
@@ -40,14 +80,7 @@ function adb(args, opts = {}) {
       maxBuffer: ADB_MAX_BUFFER,
       encoding: opts.binary ? 'buffer' : 'utf8',
     }, (err, stdout, stderr) => {
-      if (err) {
-        // v0.3.2: не терять stdout при exit!=0 — при отладке shell-пайплайнов
-        // сообщение "Command failed: adb ..." без вывода команды бесполезно.
-        let msg = (stderr || '').toString().trim() || err.message;
-        const out = opts.binary ? '' : (stdout || '').toString().trim();
-        if (out) msg = `${msg}\nstdout (tail): ${out.slice(-2000)}`;
-        return reject(new Error(friendlyAdbError(msg)));
-      }
+      if (err) return reject(new Error(describeAdbFailure(err, stderr, stdout, args, opts)));
       resolve(opts.withStderr ? { stdout, stderr } : stdout);
     });
   });
@@ -143,14 +176,14 @@ function ensureDir(p) {
   return p;
 }
 
-// serial вида 192.168.1.50:5555 -> 192.168.1.50_5555 (для имён каталогов)
+// serial вида 192.0.2.50:5555 -> 192.0.2.50_5555 (для имён каталогов)
 function sanitizeSerial(serial) {
   return String(serial || 'default').replace(/[^\w.\-]+/g, '_');
 }
 
 module.exports = {
   FILE_ROOTS, ADB_TIMEOUT_MS, ADB_MAX_BUFFER,
-  adb, adbSh, withSerial, friendlyAdbError,
+  adb, adbSh, withSerial, friendlyAdbError, describeAdbFailure,
   sq, text, json, escapeInputText,
   coerceArray, coerceBool, coerceObject,
   resolveSafeHostPath, ensureDir, sanitizeSerial,
